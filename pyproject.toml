@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "iran-market"
+version = "0.1.1"
+description = "Reusable Iranian financial-market data toolkit (providers -> normalization -> storage -> candles -> consumers)"
+requires-python = ">=3.10"
+dependencies = [
+  "httpx>=0.27",
+  "pydantic>=2.7",
+  "pytz>=2024.1",
+  "polars>=1.0",
+  "zstandard>=0.22",
+  "fastapi>=0.115",
+  "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+postgres = ["psycopg[binary]>=3.1", "asyncpg>=0.29"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23"]
+
+[project.scripts]
+iran-market = "iran_market.cli:main"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = ["integration: tests hitting live APIs (run manually: -m integration)"]
+testpaths = ["tests"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/iran_market"]
