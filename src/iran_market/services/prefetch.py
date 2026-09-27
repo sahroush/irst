@@ -169,11 +169,14 @@ class PrefetchService:
             )
             # Replay every selected candle chronologically. ScannerService evaluates
             # strictly "as of" each candle, so no future leakage occurs.
-            for inst in instruments:
+            total_inst = len(instruments)
+            for idx, inst in enumerate(instruments, 1):
                 series = self.c.candles_repo.get_series(inst.id, signal_timeframe)
                 for candle in series:
                     if scanner.evaluate(candle) is not None:
                         report.signals_generated += 1
+                if progress is not None:
+                    progress(idx, total_inst, [], phase="replay", symbol=inst.symbol)
 
         return report
 

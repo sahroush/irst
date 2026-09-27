@@ -218,12 +218,20 @@ async def cmd_demo(args, c) -> int:
     return 0
 
 
-def _prefetch_progress(done: int, total: int, outcomes) -> None:
+def _prefetch_progress(done: int, total: int, outcomes, phase: str = "fetch", symbol=None) -> None:
+    if phase == "replay":
+        print(
+            f"prefetch replay: {done}/{total} instruments ({done * 100 / total:.1f}%)"
+            f"  symbol={symbol or '-'}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return
     ok = sum(o.status == "OK" for o in outcomes)
     skipped = sum(o.status == "SKIPPED_DONE" for o in outcomes)
     failed = sum(o.status == "FAILED" for o in outcomes)
     print(
-        f"prefetch: {done}/{total} instrument-days "
+        f"prefetch fetch: {done}/{total} instrument-days "
         f"({done * 100 / total:.1f}%)  batch ok={ok} skipped={skipped} failed={failed}",
         file=sys.stderr,
         flush=True,
