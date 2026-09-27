@@ -47,5 +47,6 @@ class Timeframe:
 ONE_MIN = Timeframe("1m")
 FIVE_MIN = Timeframe("5m")
 FIFTEEN_MIN = Timeframe("15m")
+THIRTY_MIN = Timeframe("30m")
 ONE_HOUR = Timeframe("1h")
 ONE_DAY = Timeframe("1d")

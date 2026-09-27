@@ -54,7 +54,7 @@ def test_scanner_signal_is_idempotent(tmp_path):
     # Rising history followed by a severe drop reliably flips a short-period Supertrend.
     closes=[100,100,100,105,110,115,120,125,130,135,80]
     for i,v in enumerate(closes): candles.upsert(candle(i,v))
-    svc=ScannerService(candles,signals,ScannerConfig(period=3,multiplier=1.5,history=50))
+    svc=ScannerService(candles,signals,ScannerConfig(timeframe="1h",period=3,multiplier=1.5,history=50))
     sig=svc.evaluate(candle(len(closes)-1,closes[-1]))
     assert sig is not None and sig.direction in {"bullish","bearish"}
     assert svc.evaluate(candle(len(closes)-1,closes[-1])) is None
@@ -68,7 +68,7 @@ def test_scanner_historical_replay_does_not_look_into_future(tmp_path):
     built=[]
     for i,v in enumerate(closes):
         c=candle(i,v); candles.upsert(c); built.append(c)
-    svc=ScannerService(candles,signals,ScannerConfig(period=3,multiplier=1.5,history=50))
+    svc=ScannerService(candles,signals,ScannerConfig(timeframe="1h",period=3,multiplier=1.5,history=50))
     # The severe drop at the final candle flips the latest trend. Evaluating an
     # earlier candle must not see that future flip or create a mis-dated signal.
     assert svc.evaluate(built[5]) is None

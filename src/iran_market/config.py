@@ -17,6 +17,7 @@ DEFAULTS = {
     "HTTP_BACKOFF_BASE": "0.5",
     "HTTP_BACKOFF_CAP": "30.0",
     "MARKET_WATCH_INTERVAL_SECONDS": "15",
+    "SCANNER_TIMEFRAME": "30m",
     "TEHRAN_TIMEZONE": "Asia/Tehran",
     "RAW_ARCHIVE_ENABLED": "0",
     "RAW_ARCHIVE_DIR": "data/raw",
@@ -38,6 +39,7 @@ class Settings:
     http_backoff_base: float = float(DEFAULTS["HTTP_BACKOFF_BASE"])
     http_backoff_cap: float = float(DEFAULTS["HTTP_BACKOFF_CAP"])
     market_watch_interval_seconds: float = float(DEFAULTS["MARKET_WATCH_INTERVAL_SECONDS"])
+    scanner_timeframe: str = DEFAULTS["SCANNER_TIMEFRAME"]
     timezone: ZoneInfo = _TEHRAN
     raw_archive_enabled: bool = False
     raw_archive_dir: str = DEFAULTS["RAW_ARCHIVE_DIR"]
@@ -61,6 +63,7 @@ class Settings:
             market_watch_interval_seconds=float(
                 _get("MARKET_WATCH_INTERVAL_SECONDS", DEFAULTS["MARKET_WATCH_INTERVAL_SECONDS"])
             ),
+            scanner_timeframe=_get("SCANNER_TIMEFRAME", DEFAULTS["SCANNER_TIMEFRAME"]),
             raw_archive_enabled=_get("RAW_ARCHIVE_ENABLED", "0").lower() in ("1", "true", "yes"),
             raw_archive_dir=_get("RAW_ARCHIVE_DIR", DEFAULTS["RAW_ARCHIVE_DIR"]),
             database_url=_get("DATABASE_URL", DEFAULTS["DATABASE_URL"]),

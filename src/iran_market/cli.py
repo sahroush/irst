@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import signal
 import sys
 from datetime import date
 
@@ -90,7 +91,6 @@ async def cmd_fetch_trades(args, c) -> int:
 
 async def cmd_candles(args, c) -> int:
     from .candles.service import CandleService
-    tf = Timeframe(args.timeframe)
     inst = c.instruments_repo.get_by_ins_code(args.ins_code)
     if inst is None:
         print(f"instrument {args.ins_code} not in registry — run fetch-trades first", file=sys.stderr)
@@ -100,7 +100,7 @@ async def cmd_candles(args, c) -> int:
         print(f"no stored trades for {args.ins_code} on {args.date} — run fetch-trades first", file=sys.stderr)
         return 1
     svc = CandleService(c.trades_repo, c.candles_repo, c.instruments_repo, c.calendar)
-    candles = svc.build_and_store(inst.id, args.date, tf, trades=trades)
+    candles = svc.build_and_store(inst.id, args.date, Timeframe(args.timeframe or c.settings.scanner_timeframe), trades=trades)
     if args.json:
         _print([x.model_dump(mode="json") for x in candles], True)
         return 0
@@ -142,8 +142,8 @@ async def cmd_backfill(args, c) -> int:
         c.tsetmc, c.http_tsetmc, c.instruments_repo, c.trades_repo, c.candles_repo,
         c.fetch_repo, concurrency=c.settings.http_concurrency,
     )
-    summary = await svc.run(args.ins_codes, args.start, args.end,
-                            timeframes=[Timeframe(t) for t in args.timeframes])
+    tfs = [Timeframe(t) for t in (args.timeframes or [c.settings.scanner_timeframe])]
+    summary = await svc.run(args.ins_codes, args.start, args.end, timeframes=tfs)
     _print(summary, args.json)
     return 0
 
@@ -158,7 +158,8 @@ async def cmd_registry_sync(args, c) -> int:
 async def cmd_scanner_once(args, c) -> int:
     from .scanner.runner import LiveScannerRunner
     from .scanner.service import ScannerConfig
-    runner = LiveScannerRunner(c, ScannerConfig(timeframe=args.timeframe, period=args.period, multiplier=args.multiplier))
+    tf = args.timeframe or c.settings.scanner_timeframe
+    runner = LiveScannerRunner(c, ScannerConfig(timeframe=tf, period=args.period, multiplier=args.multiplier))
     if args.sync_registry:
         await runner.sync_registry()
     stats = await runner.once()
@@ -169,8 +170,9 @@ async def cmd_scanner_once(args, c) -> int:
 async def cmd_scanner_run(args, c) -> int:
     from .scanner.runner import LiveScannerRunner
     from .scanner.service import ScannerConfig
-    runner = LiveScannerRunner(c, ScannerConfig(timeframe=args.timeframe, period=args.period, multiplier=args.multiplier))
-    print(f"scanner running: {args.timeframe} Supertrend({args.period}, {args.multiplier}); Ctrl-C to stop")
+    tf = args.timeframe or c.settings.scanner_timeframe
+    runner = LiveScannerRunner(c, ScannerConfig(timeframe=tf, period=args.period, multiplier=args.multiplier))
+    print(f"scanner running: {tf} Supertrend({args.period}, {args.multiplier}); Ctrl-C to stop")
     await runner.run()
     return 0
 
@@ -201,7 +203,8 @@ async def cmd_demo(args, c) -> int:
     try:
         report = await svc.run(
             symbol=args.symbol, ins_code=args.ins_code, sessions=args.sessions,
-            timeframe=args.timeframe, period=args.period, multiplier=args.multiplier,
+            timeframe=args.timeframe or c.settings.scanner_timeframe,
+            period=args.period, multiplier=args.multiplier,
             sync_registry=not args.no_sync_registry,
             max_lookback_days=args.max_lookback_days,
         )
@@ -237,8 +240,8 @@ async def cmd_prefetch(args, c) -> int:
             start=args.start,
             end=args.end,
             symbols=args.symbols or None,
-            timeframes=args.timeframes,
-            signal_timeframe=args.signal_timeframe,
+            timeframes=args.timeframes or [c.settings.scanner_timeframe],
+            signal_timeframe=args.signal_timeframe or c.settings.scanner_timeframe,
             period=args.period,
             multiplier=args.multiplier,
             sync_registry=not args.no_sync_registry,
@@ -265,6 +268,58 @@ async def cmd_dashboard(args, c) -> int:
     return 0
 
 
+async def cmd_serve(args, c) -> int:
+    """All-in-one: catch-up -> scanner + auto-reconcile + dashboard, one process."""
+    import uvicorn
+    from .dashboard.app import create_app
+    from .runtime import MarketRuntime
+
+    tf = args.timeframe or c.settings.scanner_timeframe
+    runtime = MarketRuntime(
+        c, timeframe=tf, period=args.period, multiplier=args.multiplier,
+        catch_up_sessions=args.sessions,
+    )
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(sig, stop.set)
+        except NotImplementedError:  # pragma: no cover (Windows)
+            pass
+
+    print(f"serve: tf={tf} Supertrend({args.period}, {args.multiplier}) "
+          f"sessions={args.sessions} dashboard=:{args.port}")
+
+    async def _scanner():
+        await runtime.catch_up()
+        await runtime.run_forever(stop, interval=c.settings.market_watch_interval_seconds)
+
+    async def _web():
+        app = create_app(c)
+        config = uvicorn.Config(app, host=args.host, port=args.port, log_level="info")
+        server = uvicorn.Server(config)
+        print("dashboard ready: http://%s:%d" % (args.host, args.port))
+        await server.serve()
+
+    done, pending = await asyncio.wait(
+        {asyncio.create_task(_scanner()), asyncio.create_task(_web())},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    stop.set()
+    for t in pending:
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+    rc = 0
+    for t in done:
+        if not t.cancelled() and t.exception() is not None:
+            print(f"serve: task failed: {t.exception()!r}", file=sys.stderr)
+            rc = 1
+    return rc
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="iran_market.cli", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -286,7 +341,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("candles")
     p.add_argument("--ins-code", required=True)
     p.add_argument("--date", required=True, type=date.fromisoformat)
-    p.add_argument("--timeframe", default="1h", choices=["1m", "5m", "15m", "1h", "1d"])
+    p.add_argument("--timeframe", default=None, choices=["1m", "5m", "15m", "30m", "1h", "1d"])
     p.set_defaults(func=cmd_candles)
 
     p = sub.add_parser("market-watch")
@@ -298,14 +353,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ins-codes", nargs="+", required=True)
     p.add_argument("--start", required=True, type=date.fromisoformat)
     p.add_argument("--end", required=True, type=date.fromisoformat)
-    p.add_argument("--timeframes", nargs="+", default=["1h"])
+    p.add_argument("--timeframes", nargs="+", default=None,
+                   choices=["1m", "5m", "15m", "30m", "1h", "1d"])
     p.set_defaults(func=cmd_backfill)
 
     sub.add_parser("registry-sync").set_defaults(func=cmd_registry_sync)
 
     for name, func in (("scanner-once", cmd_scanner_once), ("scanner-run", cmd_scanner_run)):
         p = sub.add_parser(name)
-        p.add_argument("--timeframe", default="1h", choices=["1m","5m","15m","1h"])
+        p.add_argument("--timeframe", default=None, choices=["1m","5m","15m","30m","1h"])
         p.add_argument("--period", type=int, default=10)
         p.add_argument("--multiplier", type=float, default=3.0)
         p.add_argument("--sync-registry", action="store_true")
@@ -323,7 +379,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--ins-code", default=None, help="optional TSETMC InsCode override")
     p.add_argument("--sessions", type=int, default=5, help="non-empty sessions to backfill")
     p.add_argument("--max-lookback-days", type=int, default=30)
-    p.add_argument("--timeframe", default="1h", choices=["1m","5m","15m","1h"])
+    p.add_argument("--timeframe", default=None, choices=["1m","5m","15m","30m","1h"])
     p.add_argument("--period", type=int, default=10)
     p.add_argument("--multiplier", type=float, default=3.0)
     p.add_argument("--no-sync-registry", action="store_true")
@@ -338,9 +394,9 @@ def main(argv: list[str] | None = None) -> int:
                    help="historical end YYYY-MM-DD (default: today)")
     p.add_argument("--symbols", nargs="*", default=None,
                    help="optional symbol subset; default is every active TSETMC-mapped instrument")
-    p.add_argument("--timeframes", nargs="+", default=["1h"],
-                   choices=["1m", "5m", "15m", "1h", "1d"])
-    p.add_argument("--signal-timeframe", default="1h", choices=["1m", "5m", "15m", "1h", "1d"])
+    p.add_argument("--timeframes", nargs="+", default=None,
+                   choices=["1m", "5m", "15m", "30m", "1h", "1d"])
+    p.add_argument("--signal-timeframe", default=None, choices=["1m", "5m", "15m", "30m", "1h", "1d"])
     p.add_argument("--period", type=int, default=10)
     p.add_argument("--multiplier", type=float, default=3.0)
     p.add_argument("--no-signals", action="store_true", help="skip Supertrend replay")
@@ -353,6 +409,16 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
     p.set_defaults(func=cmd_dashboard)
+
+    p = sub.add_parser("serve", help="all-in-one: catch-up + live scanner + auto-reconcile + dashboard")
+    p.add_argument("--host", default="127.0.0.1")
+    p.add_argument("--port", type=int, default=8000)
+    p.add_argument("--timeframe", default=None, choices=["1m", "5m", "15m", "30m", "1h"])
+    p.add_argument("--period", type=int, default=10)
+    p.add_argument("--multiplier", type=float, default=3.0)
+    p.add_argument("--sessions", type=int, default=30,
+                   help="catch-up history sessions on startup (default: 30)")
+    p.set_defaults(func=cmd_serve)
 
     args = parser.parse_args(argv)
     setup_logging("WARNING")  # CLI stays readable; structured logs to stderr at WARN+

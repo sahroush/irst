@@ -11,8 +11,8 @@ from ..storage.base import CandleRepository, SignalRepository
 
 @dataclass(frozen=True)
 class ScannerConfig:
-    name: str = "hourly-supertrend"
-    timeframe: str = "1h"
+    name: str = "supertrend"
+    timeframe: str = "30m"
     period: int = 10
     multiplier: float = 3.0
     history: int = 100

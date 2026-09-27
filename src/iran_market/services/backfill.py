@@ -57,7 +57,7 @@ class BackfillService:
         requests = [(ins, d) for ins in ins_codes for d in daterange(start, end)]
         outcomes = await self._history.fetch_many(requests)
 
-        timeframes = timeframes or [Timeframe("1h")]
+        timeframes = timeframes or [Timeframe("30m")]
         built = 0
         for outcome in outcomes:
             if outcome.status != "OK" or outcome.trades == 0:

@@ -16,13 +16,14 @@ HTML = r'''<!doctype html><html lang="en" dir="ltr"><head><meta charset="utf-8">
 <div class="two"><section class="panel"><h2>Market universe / latest candles</h2><table><thead><tr><th>Symbol</th><th>Market</th><th>Close</th><th>Status</th><th>Updated</th></tr></thead><tbody id="inst"></tbody></table></section><section class="panel"><h2>Recent Supertrend flips</h2><table><thead><tr><th>Symbol</th><th>Direction</th><th>Time</th></tr></thead><tbody id="signals"></tbody></table></section></div>
 <section id="detail" class="panel detail hide"><h2 id="detailTitle">Instrument</h2><canvas id="chart" width="1000" height="240"></canvas><div id="detailMeta" class="sub"></div></section></div>
 <script>
+const TF=await (await fetch('/api/config')).scanner_timeframe;
 const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
 async function get(u){let r=await fetch(u);if(!r.ok)throw Error(await r.text());return r.json()}
 function ago(iso){if(!iso)return'-';let n=(Date.now()-new Date(iso).getTime())/1000;if(n<60)return Math.max(0,Math.round(n))+'s ago';if(n<3600)return Math.round(n/60)+'m ago';return new Date(iso).toLocaleString()}
 async function load(){let [h,i,s]=await Promise.all([get('/api/health'),get('/api/instruments?limit=100'),get('/api/signals?limit=30')]);active.textContent=h.active_instruments;building.textContent=h.building_candles;signalsCount.textContent=h.signals;snapshot.textContent=ago(h.last_snapshot_time);healthBadge.textContent=h.status;healthBadge.className='status '+(h.status==='HEALTHY'?'bull':h.status==='UNHEALTHY'?'bear':'');renderInst(i);renderSignals(s)}
 function renderInst(rows){inst.innerHTML=rows.map(x=>`<tr class="click" onclick="detail('${x.id}')"><td>${esc(x.symbol||x.isin)}</td><td>${esc(x.market||'-')}</td><td>${esc(x.close??'-')}</td><td>${esc(x.candle_status||'-')}</td><td>${ago(x.updated_at)}</td></tr>`).join('')||'<tr><td colspan=5>No instruments yet. Run registry sync / scanner.</td></tr>'}
 function renderSignals(rows){signals.innerHTML=rows.map(x=>`<tr><td>${esc(x.symbol||x.instrument_id)}</td><td class="${x.direction==='bullish'?'bull':'bear'}">${esc(x.direction)}</td><td>${ago(x.candle_time)}</td></tr>`).join('')||'<tr><td colspan=3>No signals yet.</td></tr>'}
-async function detail(id){let d=await get('/api/instruments/'+id+'?timeframe=1h&limit=120');document.getElementById('detail').classList.remove('hide');detailTitle.textContent=(d.instrument.symbol||d.instrument.isin)+' · 1h';detailMeta.textContent='Supertrend: '+(d.supertrend.state||'UNKNOWN')+' · ATR: '+(d.supertrend.atr??'-');draw(d.candles,d.supertrend_series)}
+async function detail(id){let d=await get('/api/instruments/'+id);document.getElementById('detail').classList.remove('hide');detailTitle.textContent=(d.instrument.symbol||d.instrument.isin)+' · '+TF;draw(d.candles,d.supertrend_series)}
 function draw(cs,st){let c=document.getElementById('chart'),x=c.getContext('2d');x.clearRect(0,0,c.width,c.height);if(!cs.length)return;let vals=cs.flatMap(q=>[q.low,q.high]).concat(st.filter(v=>v!=null));let mn=Math.min(...vals),mx=Math.max(...vals),pad=(mx-mn||1)*.08;mn-=pad;mx+=pad;let X=i=>30+i*(c.width-60)/Math.max(1,cs.length-1),Y=v=>c.height-20-(v-mn)*(c.height-40)/(mx-mn);x.strokeStyle='#6ea8fe';x.lineWidth=2;x.beginPath();cs.forEach((q,i)=>i?x.lineTo(X(i),Y(q.close)):x.moveTo(X(i),Y(q.close)));x.stroke();x.strokeStyle='#35c48d';x.beginPath();let started=false;st.forEach((v,i)=>{if(v==null)return;if(!started){x.moveTo(X(i),Y(v));started=true}else x.lineTo(X(i),Y(v))});x.stroke()}
 search.addEventListener('input',async e=>{let q=e.target.value.trim();renderInst(await get('/api/instruments?limit=100&q='+encodeURIComponent(q)))});load().catch(e=>console.error(e));setInterval(()=>load().catch(()=>{}),30000)
 </script></body></html>'''
@@ -39,12 +40,17 @@ def create_app(container=None) -> FastAPI:
     @app.get("/api/health")
     def health(): return HealthService(c).report()
 
+    @app.get("/api/config")
+    def config():
+        return {"scanner_timeframe": c.settings.scanner_timeframe}
+
     @app.get("/api/instruments")
     def instruments(limit: int = Query(100, ge=1, le=1000), q: str = ""):
+        tf = c.settings.scanner_timeframe
         sql = """SELECT i.*, c.close, c.status candle_status, c.updated_at candle_updated
-                 FROM instruments i LEFT JOIN candles c ON c.rowid=(SELECT c2.rowid FROM candles c2 WHERE c2.instrument_id=i.id AND c2.timeframe='1h' ORDER BY c2.start_time DESC LIMIT 1)
+                 FROM instruments i LEFT JOIN candles c ON c.rowid=(SELECT c2.rowid FROM candles c2 WHERE c2.instrument_id=i.id AND c2.timeframe=? ORDER BY c2.start_time DESC LIMIT 1)
                  WHERE i.active=1"""
-        params=[]
+        params=[tf]
         if q:
             sql += " AND (i.symbol LIKE ? OR i.name LIKE ? OR i.isin LIKE ?)"; params += [f"%{q}%"]*3
         sql += " ORDER BY i.symbol LIMIT ?"; params.append(limit)
@@ -57,7 +63,8 @@ def create_app(container=None) -> FastAPI:
         return [{"id":r["id"],"instrument_id":r["instrument_id"],"symbol":r["symbol"],"direction":r["direction"],"candle_time":r["candle_time"],"scanner_name":r["scanner_name"]} for r in rows]
 
     @app.get("/api/instruments/{instrument_id}")
-    def instrument_detail(instrument_id: str, timeframe: str = "1h", limit: int = Query(120, ge=10, le=1000)):
+    def instrument_detail(instrument_id: str, timeframe: str | None = None, limit: int = Query(120, ge=10, le=1000)):
+        timeframe = timeframe or c.settings.scanner_timeframe
         inst=c.instruments_repo.get(instrument_id)
         if inst is None: raise HTTPException(404,"instrument not found")
         cs=c.candles_repo.get_series(inst.id,timeframe)[-limit:]

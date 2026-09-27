@@ -56,7 +56,7 @@ class PrefetchService:
         end: date | None = None,
         symbols: list[str] | None = None,
         timeframes: list[str] | None = None,
-        signal_timeframe: str = "1h",
+        signal_timeframe: str = "30m",
         period: int = 10,
         multiplier: float = 3.0,
         sync_registry: bool = True,
@@ -140,7 +140,7 @@ class PrefetchService:
             self.c.calendar,
             events=self.c.events,
         )
-        tfs = [Timeframe(x) for x in (timeframes or ["1h"])]
+        tfs = [Timeframe(x) for x in (timeframes or ["30m"])]
 
         # Build candles oldest -> newest.  SKIPPED_DONE is deliberately included:
         # the fetch may already exist while candles are missing after an interrupted run.
