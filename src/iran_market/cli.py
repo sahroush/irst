@@ -299,8 +299,7 @@ async def cmd_serve(args, c) -> int:
           f"sessions={args.sessions} dashboard=:{args.port}")
 
     async def _scanner():
-        await runtime.catch_up()
-        await runtime.run_forever(stop, interval=c.settings.market_watch_interval_seconds)
+        await runtime.run_with_catch_up(stop, interval=c.settings.market_watch_interval_seconds)
 
     async def _web():
         app = create_app(c)

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
-from datetime import timedelta
+from datetime import datetime
 
 from ..timeutil import now_tehran
 
@@ -45,17 +45,15 @@ class HealthService:
         last_fetch = conn.execute("SELECT MAX(finished_at) t FROM fetch_runs WHERE status='OK'").fetchone()["t"]
         stale_seconds = None
         if last_state:
-            from datetime import datetime
             ts = datetime.fromisoformat(last_state)
             stale_seconds = max(0, int((now - ts).total_seconds()))
         win = self.c.calendar.primary_session(now.date())
         market_state = "OPEN" if win is not None and win.start <= now < win.end else "CLOSED"
+        freshness_limit = max(120, self.c.settings.market_watch_interval_seconds * 2)
         if not active:
             status = "UNHEALTHY"
-        elif market_state == "CLOSED":
-            status = "HEALTHY"
         else:
-            status = "HEALTHY" if stale_seconds is not None and stale_seconds <= 120 else "DEGRADED"
+            status = "HEALTHY" if stale_seconds is not None and stale_seconds <= freshness_limit else "DEGRADED"
         return {
             "status": status, "market_state": market_state, "now": now.isoformat(), "active_instruments": active,
             "building_candles": building, "signals": signals,

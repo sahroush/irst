@@ -10,6 +10,7 @@ idempotent.
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict, dataclass, field
 from datetime import date, timedelta
 from typing import Iterable
@@ -155,6 +156,7 @@ class PrefetchService:
                 for tf in tfs:
                     candles = candle_service.build_and_store(inst.id, day, tf, trades=trades)
                     report.candles_built += len(candles)
+                await asyncio.sleep(0)
 
         if replay_signals and signal_timeframe in {tf.code for tf in tfs}:
             scanner = ScannerService(
@@ -177,6 +179,7 @@ class PrefetchService:
                         report.signals_generated += 1
                 if progress is not None:
                     progress(idx, total_inst, [], phase="replay", symbol=inst.symbol)
+                await asyncio.sleep(0)
 
         return report
 

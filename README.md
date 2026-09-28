@@ -38,12 +38,13 @@ A read-only FastAPI dashboard showing:
 - active instrument count;
 - live BUILDING candle count;
 - latest market snapshot age;
-- searchable instrument universe;
-- latest 1-hour candle per instrument;
+- searchable instrument watchlist;
+- latest scanner-timeframe candle per instrument;
 - recent Supertrend flips;
-- per-instrument close-price chart with Supertrend overlay.
+- selected-instrument OHLC candlesticks, volume histogram, confirmed Supertrend overlay, and signal markers;
+- separate feed-observation and candle timestamps, with explicit empty/stale states.
 
-The dashboard has no Node/frontend build step and no external chart dependency.
+The dashboard has no Node/frontend build step or runtime CDN dependency. It serves a pinned Lightweight Charts 4.2.3 bundle locally; upstream Apache-2.0 license is included beside the asset.
 
 ---
 
@@ -279,7 +280,7 @@ These are expected properties of a snapshot-derived provisional candle. TSETMC t
 - last closed/reconciled candle;
 - last successful historical fetch.
 
-While the configured market session is open, `HEALTHY` requires a recent live snapshot (currently within 120 seconds); otherwise health becomes `DEGRADED`. When the market is closed, stale live snapshots are expected, so a populated registry can still report `HEALTHY`. An empty registry reports `UNHEALTHY`.
+`serve` polls WebGW during and after the configured market session. `HEALTHY` requires a live snapshot within `max(120 seconds, 2 × MARKET_WATCH_INTERVAL_SECONDS)`; otherwise health is `DEGRADED`. An empty registry reports `UNHEALTHY`.
 
 ## Testing
 

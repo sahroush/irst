@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Iran Market Scanner</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <script src="/static/vendor/lightweight-charts.standalone.production.js" defer></script>
+  <script src="/static/dashboard.js" defer></script>
+</head>
+<body>
+  <main class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">TSE / TSETMC · market monitor</p>
+        <h1>Iran Market Scanner</h1>
+        <p class="subtitle">Candles, volume, and Supertrend signals</p>
+      </div>
+      <div class="toolbar">
+        <label for="timeframe">Global timeframe</label>
+        <select id="timeframe" aria-label="Global timeframe"><option value="">Loading…</option></select>
+        <label class="search-label" for="search">Search instruments</label>
+        <input id="search" type="search" autocomplete="off" placeholder="Symbol, name, or ISIN">
+        <button id="refresh" class="button button-quiet" type="button">Refresh</button>
+      </div>
+    </header>
+
+    <div id="page-error" class="notice error" role="alert" hidden></div>
+    <div id="page-status" class="sr-only" role="status" aria-live="polite"></div>
+
+    <section class="metrics" aria-label="Market summary">
+      <article class="metric"><span class="metric-label">Active instruments</span><strong id="active">—</strong></article>
+      <article class="metric"><span class="metric-label">Building candles</span><strong id="building">—</strong></article>
+      <article class="metric"><span class="metric-label">Signals</span><strong id="signals-count">—</strong></article>
+      <article class="metric"><span class="metric-label">Latest observation</span><strong id="snapshot" class="metric-small">—</strong></article>
+      <article class="metric health-metric"><span class="metric-label">Feed health</span><strong id="health-badge" class="health-badge">Loading</strong></article>
+    </section>
+
+    <div class="content-grid">
+      <section id="detail" class="panel detail-panel" aria-labelledby="detail-title">
+        <div class="panel-heading detail-heading">
+          <div><p class="eyebrow">Price action · <span id="candle-age">Candle: —</span></p><h2 id="detail-title">Select instrument</h2></div>
+          <div class="chart-tools">
+            <span id="market-state" class="state-pill">—</span>
+            <button id="close-detail" class="button button-quiet" type="button">Clear</button>
+          </div>
+        </div>
+        <p id="chart-summary" class="chart-summary" aria-live="polite">Choose an instrument to load chart.</p>
+        <div class="chart-controls" role="group" aria-label="Visible chart range">
+          <button class="range-button" data-range="1D" type="button">1D</button>
+          <button class="range-button" data-range="1W" type="button">1W</button>
+          <button class="range-button active" data-range="ALL" type="button">All</button>
+        </div>
+        <div class="legend" aria-label="Chart legend"><span><i class="legend-candle"></i>OHLC</span><span><i class="legend-volume"></i>Volume</span><span><i class="legend-trend"></i>Supertrend</span></div>
+        <div id="market-chart" class="chart" role="img" aria-label="Candlestick chart with volume and Supertrend overlay"></div>
+        <p id="chart-empty" class="empty chart-empty" hidden>No candles available for selected timeframe.</p>
+      </section>
+
+      <aside class="side-stack">
+        <section class="panel instruments-panel" aria-labelledby="instruments-title">
+          <div class="panel-heading">
+            <div><p class="eyebrow">Universe</p><h2 id="instruments-title">Watchlist</h2></div>
+            <span id="instrument-total" class="subtle"></span>
+          </div>
+          <div class="table-scroll watchlist-scroll">
+            <table>
+              <thead><tr><th scope="col">Symbol</th><th scope="col">Close</th><th scope="col">Updated</th></tr></thead>
+              <tbody id="instrument-rows"><tr><td colspan="3" class="empty">Loading instruments…</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+        <section class="panel signals-panel" aria-labelledby="signals-title">
+          <div class="panel-heading"><div><p class="eyebrow">Recent activity</p><h2 id="signals-title">Supertrend flips</h2></div></div>
+          <div class="table-scroll">
+            <table>
+              <thead><tr><th scope="col">Symbol</th><th scope="col">Direction</th><th scope="col">Time</th></tr></thead>
+              <tbody id="signal-rows"><tr><td colspan="3" class="empty">Loading signals…</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <footer class="footer"><span>Read-only market dashboard</span><span id="updated-at">Waiting for data</span></footer>
+  </main>
+</body>
+</html>
+
+<!-- Serve this file at / or include its body in the app's HTML response. -->

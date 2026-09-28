@@ -54,7 +54,7 @@ class CandleRepository(abc.ABC):
 
     @abc.abstractmethod
     def get_series(self, instrument_id, timeframe: str, start: datetime | None = None,
-                   end: datetime | None = None) -> list[Candle]: ...
+                   end: datetime | None = None, limit: int | None = None) -> list[Candle]: ...
 
 
 class FetchRunRepository(abc.ABC):

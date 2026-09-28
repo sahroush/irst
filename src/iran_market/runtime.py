@@ -117,9 +117,10 @@ class MarketRuntime:
         self.reconciler = ReconciliationService(container)
         self._reconciled_days: set = set()
 
-    async def catch_up(self) -> dict:
+    async def catch_up(self, *, sync_registry: bool = True) -> dict:
         """Startup historical bootstrap: registry sync + resumable prefetch."""
-        await RegistrySyncService(self.c.webgw, self.c.legacy, self.c.instruments_repo).sync()
+        if sync_registry:
+            await RegistrySyncService(self.c.webgw, self.c.legacy, self.c.instruments_repo).sync()
         svc = PrefetchService(self.c)
         report = await svc.run(
             sessions=self.catch_up_sessions,
@@ -146,6 +147,8 @@ class MarketRuntime:
                     await runner.once()
                     await self._wait(stop_event, interval)
                 else:
+                    # Refresh observation state before potentially slow reconciliation.
+                    await runner.once()
                     # Market closed: finalize + reconcile the just-finished session.
                     await self._reconcile_finished_day(now.date())
                     await self._wait(stop_event, max(interval, 30.0))
@@ -154,6 +157,34 @@ class MarketRuntime:
             except Exception as exc:
                 log.error("runtime loop error", extra={"error": f"{type(exc).__name__}: {exc}"})
                 await self._wait(stop_event, max(interval, 30.0))
+
+    async def run_with_catch_up(self, stop_event: asyncio.Event, interval: float) -> None:
+        """Run live polling immediately; bootstrap historical data in background."""
+        catchup_task = asyncio.create_task(self._catch_up_until_complete(stop_event))
+        try:
+            await self.run_forever(stop_event, interval)
+        finally:
+            catchup_task.cancel()
+            try:
+                await catchup_task
+            except asyncio.CancelledError:
+                pass
+
+    async def _catch_up_until_complete(self, stop_event: asyncio.Event) -> None:
+        while not stop_event.is_set():
+            try:
+                await RegistrySyncService(self.c.webgw, self.c.legacy, self.c.instruments_repo).sync()
+                report = await self.catch_up(sync_registry=False)
+                if not report.get("failed"):
+                    return
+                log.warning("catch-up incomplete; retrying failed instrument-days",
+                            extra={"failed": report["failed"]})
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.error("startup sync/catch-up failed; live scanner remains active",
+                          extra={"error": f"{type(exc).__name__}: {exc}"})
+            await self._wait(stop_event, 300.0)
 
     async def _reconcile_finished_day(self, day) -> None:
         """Reconcile the finished session once per process per day (idempotent)."""

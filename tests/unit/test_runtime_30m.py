@@ -132,3 +132,61 @@ def test_reconcile_after_close_marks_reconciled(tmp_path):
     report2 = asyncio.run(svc.run_day(DAY, timeframe="30m", period=3, multiplier=1.5))
     assert report2["candles_reconciled"] == 1
     assert len(candles.get_series(IID, "30m")) == 1
+
+
+def test_live_poll_runs_while_startup_catchup_is_pending(monkeypatch):
+    import iran_market.runtime as runtime_module
+
+    stop = asyncio.Event()
+    catchup_started = asyncio.Event()
+    polled = asyncio.Event()
+
+    async def slow_catchup(_self, _stop_event):
+        catchup_started.set()
+        await asyncio.Event().wait()
+
+    async def run_forever(_self, _stop, interval):
+        assert interval == 0.01
+        await asyncio.sleep(0)
+        assert catchup_started.is_set()
+        polled.set()
+        stop.set()
+
+    monkeypatch.setattr(runtime_module.MarketRuntime, "_catch_up_until_complete", slow_catchup)
+    monkeypatch.setattr(runtime_module.MarketRuntime, "run_forever", run_forever)
+    container = SimpleNamespace(
+        settings=Settings.for_tests(market_watch_interval_seconds=0.01),
+        webgw=None, legacy=None, instruments_repo=None,
+    )
+    runtime = runtime_module.MarketRuntime(container, timeframe="30m")
+
+    asyncio.run(runtime.run_with_catch_up(stop, interval=0.01))
+    assert polled.is_set()
+
+
+def test_runtime_polls_marketwatch_when_market_closed(monkeypatch):
+    import iran_market.runtime as runtime_module
+
+    now = datetime(2026, 9, 28, 15, 0, tzinfo=TEHRAN)
+    monkeypatch.setattr(runtime_module, "now_tehran", lambda: now)
+    polled = asyncio.Event()
+    stop = asyncio.Event()
+
+    class FakeRunner:
+        def __init__(self, *_args):
+            pass
+
+        async def once(self):
+            polled.set()
+            stop.set()
+
+    monkeypatch.setattr("iran_market.scanner.runner.LiveScannerRunner", FakeRunner)
+    container = SimpleNamespace(calendar=TradingCalendar(), settings=Settings.for_tests())
+    runtime = runtime_module.MarketRuntime(container, timeframe="30m")
+
+    async def no_reconcile(_day):
+        return None
+
+    runtime._reconcile_finished_day = no_reconcile
+    asyncio.run(runtime.run_forever(stop, interval=1))
+    assert polled.is_set()

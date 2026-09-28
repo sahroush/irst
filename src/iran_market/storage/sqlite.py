@@ -112,6 +112,7 @@ CREATE TABLE IF NOT EXISTS candles (
     reconciled_at TEXT,
     PRIMARY KEY (instrument_id, timeframe, start_time)
 );
+CREATE INDEX IF NOT EXISTS ix_candles_timeframe ON candles(timeframe);
 
 CREATE TABLE IF NOT EXISTS fetch_runs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -347,7 +348,7 @@ class SqliteCandleRepository(CandleRepository):
         return self._row_to_candle(r) if r else None
 
     def get_series(self, instrument_id, timeframe: str, start: datetime | None = None,
-                   end: datetime | None = None) -> list[Candle]:
+                   end: datetime | None = None, limit: int | None = None) -> list[Candle]:
         q = "SELECT * FROM candles WHERE instrument_id = ? AND timeframe = ?"
         params: list = [str(instrument_id), timeframe]
         if start:
@@ -357,7 +358,13 @@ class SqliteCandleRepository(CandleRepository):
             q += " AND start_time < ?"
             params.append(end.isoformat())
         q += " ORDER BY start_time"
-        return [self._row_to_candle(r) for r in self._store.connect().execute(q, params).fetchall()]
+        if limit is not None:
+            rows = self._store.connect().execute(
+                f"SELECT * FROM ({q} DESC LIMIT ?) ORDER BY start_time", [*params, limit]
+            ).fetchall()
+        else:
+            rows = self._store.connect().execute(q, params).fetchall()
+        return [self._row_to_candle(r) for r in rows]
 
     @staticmethod
     def _row_to_candle(r: sqlite3.Row) -> Candle:
