@@ -371,7 +371,7 @@ def main(argv: list[str] | None = None) -> int:
 
     for name, func in (("scanner-once", cmd_scanner_once), ("scanner-run", cmd_scanner_run)):
         p = sub.add_parser(name)
-        p.add_argument("--timeframe", default=None, choices=["1m","5m","15m","30m","1h"])
+        p.add_argument("--timeframe", default=None, choices=["1m","5m","15m","30m","1h","1d"])
         p.add_argument("--period", type=int, default=10)
         p.add_argument("--multiplier", type=float, default=3.0)
         p.add_argument("--sync-registry", action="store_true")
@@ -423,7 +423,7 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("serve", help="all-in-one: catch-up + live scanner + auto-reconcile + dashboard")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8000)
-    p.add_argument("--timeframe", default=None, choices=["1m", "5m", "15m", "30m", "1h"])
+    p.add_argument("--timeframe", default=None, choices=["1m", "5m", "15m", "30m", "1h", "1d"])
     p.add_argument("--period", type=int, default=10)
     p.add_argument("--multiplier", type=float, default=3.0)
     p.add_argument("--sessions", type=int, default=30,

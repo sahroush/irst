@@ -517,6 +517,18 @@ class SqliteSignalRepository(SignalRepository):
             )
         return cur.rowcount > 0
 
+    def get(self, signal_id: str):
+        r = self._store.connect().execute(
+            "SELECT * FROM signals WHERE id = ?", (signal_id,)
+        ).fetchone()
+        return self._row_to_signal(r) if r else None
+
+    def delete(self, signal_id: str) -> bool:
+        conn = self._store.connect()
+        with conn:
+            cur = conn.execute("DELETE FROM signals WHERE id = ?", (signal_id,))
+        return cur.rowcount > 0
+
     @staticmethod
     def _row_to_signal(r: sqlite3.Row):
         from ..models import Signal

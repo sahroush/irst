@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from ..candles.models import Timeframe
 from ..events import EventBus
+from ..models import CandleStatus
 from ..registry.sync import RegistrySyncService
 from ..services.collector import MarketWatchCollector
 from ..services.live_candles import LiveCandleService
@@ -41,16 +42,27 @@ class LiveScannerRunner:
         snaps = await self.collector.poll()
         self.stats.polls += 1
         self.stats.snapshots += len(snaps)
+        building: dict = {}
         for s in snaps:
             inst = self.c.instruments_repo.get_by_isin(s.isin) if s.isin else None
             if inst is None:
                 continue
             s.instrument_id = inst.id
             self.stats.resolved += 1
-            self.live.process(s, self.tf)
+            candle = self.live.process(s, self.tf)
+            if candle is not None and candle.status == CandleStatus.BUILDING:
+                building[candle.instrument_id] = candle
         closed = self.live.close_elapsed(now_tehran(), self.tf)
         self.stats.candles_closed += len(closed)
+        closed_ids = {c.instrument_id for c in closed}
         for candle in closed:
+            if self.scanner.evaluate(candle):
+                self.stats.signals += 1
+        # Provisional alerts: scan the in-progress candle on available prices so
+        # the current 30m/1h/day can signal before its period completes.
+        for instrument_id, candle in building.items():
+            if instrument_id in closed_ids:
+                continue
             if self.scanner.evaluate(candle):
                 self.stats.signals += 1
         return self.stats

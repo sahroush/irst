@@ -101,6 +101,14 @@ class SignalRepository(abc.ABC):
         """Insert; returns False if duplicate (idempotent)."""
 
     @abc.abstractmethod
+    def get(self, signal_id: str):
+        """Fetch one signal by id, or None."""
+
+    @abc.abstractmethod
+    def delete(self, signal_id: str) -> bool:
+        """Remove one signal by id; returns False when absent."""
+
+    @abc.abstractmethod
     def get_latest(self, limit: int = 50, scanner_name: str | None = None) -> list: ...
 
     @abc.abstractmethod

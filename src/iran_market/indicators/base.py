@@ -49,6 +49,20 @@ def closed_candles(candles: Sequence[Candle]) -> list[Candle]:
     ]
 
 
+def provisional_candles(candles: Sequence[Candle]) -> list[Candle]:
+    """Closed bars plus a trailing BUILDING bar treated as closed.
+
+    Lets indicators/alerts evaluate the in-progress period from the prices
+    observed so far. Only the final (most recent) candle can be provisional;
+    earlier BUILDING bars are dropped exactly like `closed_candles`.
+    Input must be chronological (callers pass repository-ordered series).
+    """
+    cs = closed_candles(candles)
+    if candles and candles[-1].status == CandleStatus.BUILDING:
+        cs.append(candles[-1].model_copy(update={"status": CandleStatus.CLOSED}))
+    return cs
+
+
 def true_range(prev_close: float | None, high: float, low: float, close: float) -> float:
     """TR = max(high-low, |high-prev_close|, |low-prev_close|). First bar: high-low."""
     if prev_close is None:

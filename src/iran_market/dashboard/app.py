@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from ..bootstrap import build
 from ..candles.models import Timeframe
+from ..indicators.base import provisional_candles
 from ..indicators.supertrend import SupertrendIndicator
 from ..indicators.rsi import rsi_confirms, rsi_series
 from ..models import Candle, CandleStatus
@@ -97,20 +98,22 @@ def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrume
         instruments = [item for item in instruments if item.id == instrument_id]
     for instrument in instruments:
         candles = _chart_series(c, instrument.id, timeframe, 120, stored)
-        closed = [bar for bar in candles if bar.status in (CandleStatus.CLOSED, CandleStatus.RECONCILED)]
-        states, _ = indicator._series(closed) if closed else ([], [])
-        rsi_values = rsi_series([float(bar.close) for bar in closed])
-        for index in range(1, len(closed)):
+        # The in-progress period participates on available prices, so the
+        # current day/30m/1h can alert before its candle closes.
+        usable = provisional_candles(candles)
+        states, _ = indicator._series(usable) if usable else ([], [])
+        rsi_values = rsi_series([float(bar.close) for bar in usable])
+        for index in range(1, len(usable)):
             if states[index] == states[index - 1] or "UNKNOWN" in (states[index], states[index - 1]):
                 continue
             direction = "bullish" if states[index] == "BULLISH" else "bearish"
             if not rsi_confirms(direction, rsi_values[index], rsi_values[index - 1]):
                 continue
             signals.append({
-                "id": f"{instrument.id}:{timeframe}:{closed[index].start_time.isoformat()}",
+                "id": f"{instrument.id}:{timeframe}:{usable[index].start_time.isoformat()}",
                 "instrument_id": str(instrument.id), "symbol": instrument.symbol,
                 "direction": direction,
-                "candle_time": closed[index].start_time.isoformat(),
+                "candle_time": usable[index].start_time.isoformat(),
                 "scanner_name": "supertrend", "timeframe": timeframe,
             })
     return sorted(signals, key=lambda signal: signal["candle_time"], reverse=True)[:limit]
@@ -195,12 +198,15 @@ def create_app(container=None) -> FastAPI:
         if inst is None: raise HTTPException(404,"instrument not found")
         cs=_chart_series(c, inst.id, timeframe, limit, stored)
         ind=SupertrendIndicator()
-        result=ind.calculate(cs)
-        confirmed = [x for x in cs if x.status.value in ("CLOSED", "RECONCILED")]
-        _, confirmed_st = ind._series(confirmed) if confirmed else ([], [])
-        confirmed_by_time = {x.start_time: value for x, value in zip(confirmed, confirmed_st)}
-        confirmed_rsi = rsi_series([float(x.close) for x in confirmed])
-        rsi_by_time = {x.start_time: value for x, value in zip(confirmed, confirmed_rsi)}
+        # The in-progress candle participates on available prices: live state,
+        # trend and RSI extend to the current period instead of stopping at
+        # the last closed bar.
+        live = provisional_candles(cs)
+        result=ind.calculate(live)
+        _, live_st = ind._series(live) if live else ([], [])
+        live_by_time = {x.start_time: value for x, value in zip(live, live_st)}
+        live_rsi = rsi_series([float(x.close) for x in live])
+        rsi_by_time = {x.start_time: value for x, value in zip(live, live_rsi)}
         markers = []
         candle_times = {int(x.start_time.timestamp()) for x in cs}
         for signal in _timeframe_signals(c, timeframe, stored, 500, inst.id):
@@ -223,7 +229,7 @@ def create_app(container=None) -> FastAPI:
                 "volume": x.volume, "status": x.status.value,
             } for x in cs],
             "supertrend": {"timeframe": timeframe, "state": result.state, "value": result.values.get("supertrend"), "atr": result.values.get("atr"), "valid": result.valid},
-            "supertrend_series": [confirmed_by_time.get(x.start_time) for x in cs],
+            "supertrend_series": [live_by_time.get(x.start_time) for x in cs],
             "rsi_series": [rsi_by_time.get(x.start_time) for x in cs],
             "markers": markers,
         }

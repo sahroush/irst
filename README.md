@@ -262,7 +262,7 @@ These are expected properties of a snapshot-derived provisional candle. TSETMC t
 - Default ATR period: `10`.
 - Default multiplier: `3.0`.
 - ATR uses Wilder's RMA/SMMA seeding and smoothing.
-- `BUILDING` candles are ignored for confirmed signals.
+- The in-progress (`BUILDING`) candle is evaluated on the prices observed so far and stores a *provisional* alert (`payload.provisional = true`) for the current 30m/1h/day period; at close the same signal is promoted to final values or retracted when the flip did not survive. Only closed/reconciled candles produce final signals.
 - A signal is stored only when the state changes:
   - `BEARISH → BULLISH`
   - `BULLISH → BEARISH`

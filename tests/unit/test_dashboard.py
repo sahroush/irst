@@ -150,6 +150,45 @@ def test_derived_daily_signals_and_markers_use_daily_supertrend_flips(tmp_path):
     ]
 
 
+def test_current_daily_alert_uses_in_progress_bar(tmp_path):
+    c = build(Settings.for_tests(database_url=f"sqlite:///{tmp_path/'db.sqlite'}"))
+    instrument = c.instruments_repo.upsert(Instrument(symbol="A", isin="IRO1TEST0001"))
+    day = datetime(2026, 9, 28, tzinfo=TEHRAN)
+    days = []
+    while len(days) < 17:
+        if day.weekday() in (5, 6, 0, 1, 2):
+            days.append(day)
+        day += timedelta(days=1)
+
+    for index, day in enumerate(days):
+        for slot in range(7):
+            start = day.replace(hour=9 + slot // 2, minute=(slot % 2) * 30)
+            open_now = index == 16 and slot == 6  # today's last 30m bar is still open
+            close = 120 if index == 16 else 100
+            c.candles_repo.upsert(Candle(
+                instrument_id=instrument.id, timeframe="30m", start_time=start,
+                end_time=start + timedelta(minutes=30), open=100,
+                high=121 if index == 16 else 101, low=99, close=close,
+                volume=1, trade_count=1,
+                status=CandleStatus.BUILDING if open_now else CandleStatus.CLOSED,
+            ))
+
+    client = TestClient(create_app(c))
+    # The derived daily bar containing the in-progress 30m bar still signals.
+    signals = client.get('/api/signals?timeframe=1d').json()
+    assert [(signal["direction"], signal["candle_time"]) for signal in signals] == [
+        ("bullish", days[-1].replace(hour=9).isoformat())
+    ]
+    detail = client.get(f"/api/instruments/{instrument.id}?timeframe=1d").json()
+    assert detail["candles"][-1]["status"] == "BUILDING"
+    assert detail["supertrend"]["state"] == "BULLISH"
+    assert detail["supertrend_series"][-1] is not None
+    assert detail["rsi_series"][-1] is not None
+    assert [(marker["position"], marker["time"]) for marker in detail["markers"]] == [
+        ("belowBar", int(days[-1].replace(hour=9).timestamp()))
+    ]
+
+
 def test_closed_market_health_checks_last_session_snapshot(tmp_path, monkeypatch):
     from iran_market.monitoring import health
 

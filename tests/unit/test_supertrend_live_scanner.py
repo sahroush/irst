@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from uuid import UUID
 
 from iran_market.candles.models import Timeframe
@@ -84,3 +84,102 @@ def test_scanner_historical_replay_does_not_look_into_future(tmp_path):
     # earlier candle must not see that future flip or create a mis-dated signal.
     assert svc.evaluate(built[5]) is None
     assert signals.get_latest() == []
+
+
+def test_scanner_alerts_on_building_candle_then_promotes_at_close(tmp_path):
+    store=SqliteStore(tmp_path/"db.sqlite"); create_schema(store)
+    candles=SqliteCandleRepository(store); signals=SqliteSignalRepository(store)
+    closes=[100,100,100,105,110,115,120,125,130,135,135,135,135,135,135,80]
+    for i,v in enumerate(closes[:-1]): candles.upsert(candle(i,v))
+    live=candle(len(closes)-1,closes[-1],CandleStatus.BUILDING)
+    candles.upsert(live)
+    svc=ScannerService(candles,signals,ScannerConfig(timeframe="1h",period=3,multiplier=1.5,history=50))
+    # The in-progress candle flips Supertrend on the prices seen so far: the
+    # alert fires before the period completes.
+    sig=svc.evaluate(live)
+    assert sig is not None and sig.direction=="bearish" and sig.payload["provisional"] is True
+    assert svc.evaluate(live) is None  # no repeat while still in progress
+    stored=signals.get_latest()
+    assert len(stored)==1 and stored[0].payload["provisional"] is True
+    # The period closes with the same prices: one signal, promoted to final.
+    closed=candle(len(closes)-1,closes[-1])
+    candles.upsert(closed)
+    assert svc.evaluate(closed) is None
+    final=signals.get_latest()
+    assert len(final)==1 and final[0].payload["provisional"] is False
+    assert final[0].direction=="bearish"
+
+
+def test_scanner_retracts_provisional_signal_when_flip_does_not_survive(tmp_path):
+    store=SqliteStore(tmp_path/"db.sqlite"); create_schema(store)
+    candles=SqliteCandleRepository(store); signals=SqliteSignalRepository(store)
+    closes=[100,100,100,105,110,115,120,125,130,135,135,135,135,135,135]
+    for i,v in enumerate(closes): candles.upsert(candle(i,v))
+    live=candle(len(closes),80,CandleStatus.BUILDING)
+    candles.upsert(live)
+    svc=ScannerService(candles,signals,ScannerConfig(timeframe="1h",period=3,multiplier=1.5,history=50))
+    assert svc.evaluate(live) is not None
+    assert len(signals.get_latest())==1
+    # The period closes but the price recovered: no flip on the final bar, so
+    # the provisional alert must not survive as a false signal.
+    closed=candle(len(closes),135)
+    candles.upsert(closed)
+    assert svc.evaluate(closed) is None
+    assert signals.get_latest() == []
+
+
+def test_live_runner_scans_in_progress_candle(tmp_path, monkeypatch):
+    import asyncio
+    from iran_market.bootstrap import build
+    from iran_market.scanner.runner import LiveScannerRunner
+
+    now = datetime(2026, 9, 23, 12, 5, tzinfo=TEHRAN)
+    monkeypatch.setattr("iran_market.scanner.runner.now_tehran", lambda: now)
+    c = build(Settings.for_tests(database_url=f"sqlite:///{tmp_path/'db.sqlite'}"))
+    inst = c.instruments_repo.upsert(Instrument(symbol="A", isin="IRO1TEST0001"))
+
+    # 15 closed 30m session bars ending 11:30; the live snapshot lands in the
+    # 12:00-12:30 bucket with a crash that flips a short-period Supertrend.
+    slots = []
+    for day in (21, 22, 23):
+        for s in range(7):
+            slots.append(datetime(2026, 9, day, 9 + s // 2, (s % 2) * 30, tzinfo=TEHRAN))
+    closes = [100,100,100,105,110,115,120,125,130,135,135,135,135,135,135]
+    for start, value in zip(slots[5:20], closes):
+        c.candles_repo.upsert(Candle(
+            instrument_id=inst.id, timeframe="30m", start_time=start,
+            end_time=start + timedelta(minutes=30), open=value, high=value + 5,
+            low=value - 5, close=value, volume=1, trade_count=1, status=CandleStatus.CLOSED,
+        ))
+    building_start = slots[20]
+
+    crash = MarketSnapshot(
+        instrument_id=None, isin="IRO1TEST0001", timestamp=now,
+        last_price=80, cumulative_volume=1000, trade_count=10,
+    )
+
+    class FakeCollector:
+        def __init__(self): self.snaps = [crash]
+        async def poll(self):
+            snaps, self.snaps = self.snaps, []
+            return snaps
+
+    runner = LiveScannerRunner(c, ScannerConfig(timeframe="30m", period=3, multiplier=1.5))
+    runner.collector = FakeCollector()
+
+    asyncio.run(runner.once())
+    row = c.candles_repo.get(inst.id, "30m", building_start)
+    assert row is not None and row.status == CandleStatus.BUILDING and row.close == 80
+    assert runner.stats.signals == 1
+    alerts = c.signals_repo.get_latest()
+    assert len(alerts) == 1
+    assert alerts[0].direction == "bearish" and alerts[0].payload["provisional"] is True
+
+    # The bucket elapses: the alert is promoted to a final signal on close.
+    monkeypatch.setattr("iran_market.scanner.runner.now_tehran",
+                        lambda: datetime(2026, 9, 23, 12, 31, tzinfo=TEHRAN))
+    asyncio.run(runner.once())
+    row = c.candles_repo.get(inst.id, "30m", building_start)
+    assert row is not None and row.status == CandleStatus.CLOSED
+    alerts = c.signals_repo.get_latest()
+    assert len(alerts) == 1 and alerts[0].payload["provisional"] is False
