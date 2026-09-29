@@ -5,6 +5,7 @@ import hashlib, json
 from dataclasses import dataclass
 
 from ..indicators.supertrend import SupertrendIndicator
+from ..indicators.rsi import rsi_confirms, rsi_series
 from ..models import Candle, Signal
 from ..storage.base import CandleRepository, SignalRepository
 
@@ -46,6 +47,10 @@ class ScannerService:
         if not current.valid or not previous.valid or current.state == previous.state:
             return None
         direction = "bullish" if current.state == "BULLISH" else "bearish"
+        rsi = rsi_series([float(item.close) for item in series])
+        current_rsi, previous_rsi = rsi[-1], rsi[-2]
+        if not rsi_confirms(direction, current_rsi, previous_rsi):
+            return None
         params_json = json.dumps(self.indicator.parameters, sort_keys=True)
         raw = f"{self.config.name}|{candle.instrument_id}|{candle.timeframe}|{candle.start_time.isoformat()}|supertrend_flip|{params_json}"
         signal = Signal(
@@ -55,7 +60,7 @@ class ScannerService:
             indicator_name="supertrend", parameters=self.indicator.parameters,
             payload={"previous_state": previous.state, "current_state": current.state,
                      "supertrend": current.values.get("supertrend"), "atr": current.values.get("atr"),
-                     "close_price": candle.close},
+                     "close_price": candle.close, "rsi": current_rsi, "previous_rsi": previous_rsi},
         )
         if not self._signals.upsert(signal):
             return None

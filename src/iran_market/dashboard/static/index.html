@@ -52,8 +52,10 @@
           <button class="range-button" data-range="1W" type="button">1W</button>
           <button class="range-button active" data-range="ALL" type="button">All</button>
         </div>
-        <div class="legend" aria-label="Chart legend"><span><i class="legend-candle"></i>OHLC</span><span><i class="legend-volume"></i>Volume</span><span><i class="legend-trend"></i>Supertrend</span></div>
+        <div class="chart-options"><button id="rsi-toggle" class="range-button rsi-toggle" type="button" aria-pressed="false">Show RSI (14)</button></div>
+        <div class="legend" aria-label="Chart legend"><span><i class="legend-candle"></i>OHLC</span><span><i class="legend-volume"></i>Volume</span><span><i class="legend-trend"></i>Supertrend</span><span id="rsi-legend" hidden><i class="legend-rsi"></i>RSI (14)</span></div>
         <div id="market-chart" class="chart" role="img" aria-label="Candlestick chart with volume and Supertrend overlay"></div>
+        <div id="rsi-panel" class="rsi-panel" hidden><p class="rsi-heading">RSI (14) <span>50 midpoint</span></p><div id="rsi-chart" class="rsi-chart" role="img" aria-label="Relative Strength Index chart with 30, 50, and 70 guide levels"></div></div>
         <p id="chart-empty" class="empty chart-empty" hidden>No candles available for selected timeframe.</p>
       </section>
 

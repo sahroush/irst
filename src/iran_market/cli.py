@@ -20,6 +20,7 @@ from datetime import date
 
 from .bootstrap import build
 from .candles.models import Timeframe
+from .indicators.rsi import rsi_confirms
 from .logging_setup import setup_logging
 
 
@@ -181,6 +182,8 @@ async def cmd_signals(args, c) -> int:
     rows = c.signals_repo.get_latest(args.limit, args.scanner)
     data = []
     for s in rows:
+        if not rsi_confirms(s.direction, s.payload.get("rsi"), s.payload.get("previous_rsi")):
+            continue
         inst = c.instruments_repo.get(s.instrument_id)
         data.append({**s.model_dump(mode="json"), "symbol": inst.symbol if inst else None})
     _print(data, args.json)

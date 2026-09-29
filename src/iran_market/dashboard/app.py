@@ -1,6 +1,7 @@
 """Read-only MVP dashboard for registry, candles, signals and health."""
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from ..bootstrap import build
 from ..candles.models import Timeframe
 from ..indicators.supertrend import SupertrendIndicator
+from ..indicators.rsi import rsi_confirms, rsi_series
 from ..models import Candle, CandleStatus
 from ..monitoring.health import HealthService
 
@@ -77,11 +79,17 @@ def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrume
         sql += " ORDER BY s.candle_time DESC LIMIT ?"
         params.append(limit)
         rows = c.store.connect().execute(sql, params).fetchall()
-        return [{
-            "id": row["id"], "instrument_id": row["instrument_id"], "symbol": row["symbol"],
-            "direction": row["direction"], "candle_time": row["candle_time"],
-            "scanner_name": row["scanner_name"], "timeframe": timeframe,
-        } for row in rows]
+        output = []
+        for row in rows:
+            payload = json.loads(row["payload"] or "{}")
+            direction = row["direction"]
+            if rsi_confirms(direction, payload.get("rsi"), payload.get("previous_rsi")):
+                output.append({
+                    "id": row["id"], "instrument_id": row["instrument_id"], "symbol": row["symbol"],
+                    "direction": direction, "candle_time": row["candle_time"],
+                    "scanner_name": row["scanner_name"], "timeframe": timeframe,
+                })
+        return output
 
     indicator, signals = SupertrendIndicator(), []
     instruments = c.instruments_repo.list_active()
@@ -91,13 +99,17 @@ def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrume
         candles = _chart_series(c, instrument.id, timeframe, 120, stored)
         closed = [bar for bar in candles if bar.status in (CandleStatus.CLOSED, CandleStatus.RECONCILED)]
         states, _ = indicator._series(closed) if closed else ([], [])
+        rsi_values = rsi_series([float(bar.close) for bar in closed])
         for index in range(1, len(closed)):
             if states[index] == states[index - 1] or "UNKNOWN" in (states[index], states[index - 1]):
+                continue
+            direction = "bullish" if states[index] == "BULLISH" else "bearish"
+            if not rsi_confirms(direction, rsi_values[index], rsi_values[index - 1]):
                 continue
             signals.append({
                 "id": f"{instrument.id}:{timeframe}:{closed[index].start_time.isoformat()}",
                 "instrument_id": str(instrument.id), "symbol": instrument.symbol,
-                "direction": "bullish" if states[index] == "BULLISH" else "bearish",
+                "direction": direction,
                 "candle_time": closed[index].start_time.isoformat(),
                 "scanner_name": "supertrend", "timeframe": timeframe,
             })
@@ -187,6 +199,8 @@ def create_app(container=None) -> FastAPI:
         confirmed = [x for x in cs if x.status.value in ("CLOSED", "RECONCILED")]
         _, confirmed_st = ind._series(confirmed) if confirmed else ([], [])
         confirmed_by_time = {x.start_time: value for x, value in zip(confirmed, confirmed_st)}
+        confirmed_rsi = rsi_series([float(x.close) for x in confirmed])
+        rsi_by_time = {x.start_time: value for x, value in zip(confirmed, confirmed_rsi)}
         markers = []
         candle_times = {int(x.start_time.timestamp()) for x in cs}
         for signal in _timeframe_signals(c, timeframe, stored, 500, inst.id):
@@ -210,6 +224,7 @@ def create_app(container=None) -> FastAPI:
             } for x in cs],
             "supertrend": {"timeframe": timeframe, "state": result.state, "value": result.values.get("supertrend"), "atr": result.values.get("atr"), "valid": result.valid},
             "supertrend_series": [confirmed_by_time.get(x.start_time) for x in cs],
+            "rsi_series": [rsi_by_time.get(x.start_time) for x in cs],
             "markers": markers,
         }
 

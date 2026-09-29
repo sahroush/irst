@@ -5,6 +5,7 @@ from iran_market.candles.models import Timeframe
 from iran_market.config import Settings
 from iran_market.events import EventBus
 from iran_market.indicators.supertrend import SupertrendIndicator
+from iran_market.indicators.rsi import rsi_confirms
 from iran_market.models import Candle, CandleStatus, Instrument, MarketSnapshot
 from iran_market.services.live_candles import LiveCandleService
 from iran_market.sessions import TradingCalendar
@@ -14,6 +15,15 @@ from iran_market.scanner.service import ScannerConfig, ScannerService
 from iran_market.timeutil import TEHRAN
 
 IID = UUID("11111111-1111-1111-1111-111111111111")
+
+
+def test_rsi_confirms_supertrend_buy_and_sell_rules():
+    assert rsi_confirms("bullish", 55, 54)
+    assert not rsi_confirms("bullish", 50, 49)
+    assert not rsi_confirms("bullish", 55, 55)
+    assert rsi_confirms("bearish", 45, 46)
+    assert not rsi_confirms("bearish", 50, 51)
+    assert not rsi_confirms("bearish", 45, 45)
 
 
 def candle(i, close, status=CandleStatus.CLOSED):
@@ -52,11 +62,12 @@ def test_scanner_signal_is_idempotent(tmp_path):
     store=SqliteStore(tmp_path/"db.sqlite"); create_schema(store)
     candles=SqliteCandleRepository(store); signals=SqliteSignalRepository(store)
     # Rising history followed by a severe drop reliably flips a short-period Supertrend.
-    closes=[100,100,100,105,110,115,120,125,130,135,80]
+    closes=[100,100,100,105,110,115,120,125,130,135,135,135,135,135,135,80]
     for i,v in enumerate(closes): candles.upsert(candle(i,v))
     svc=ScannerService(candles,signals,ScannerConfig(timeframe="1h",period=3,multiplier=1.5,history=50))
     sig=svc.evaluate(candle(len(closes)-1,closes[-1]))
-    assert sig is not None and sig.direction in {"bullish","bearish"}
+    assert sig is not None and sig.direction == "bearish"
+    assert sig.payload["rsi"] < 50 and sig.payload["rsi"] < sig.payload["previous_rsi"]
     assert svc.evaluate(candle(len(closes)-1,closes[-1])) is None
     assert len(signals.get_latest())==1
 
@@ -64,7 +75,7 @@ def test_scanner_signal_is_idempotent(tmp_path):
 def test_scanner_historical_replay_does_not_look_into_future(tmp_path):
     store=SqliteStore(tmp_path/"historical.sqlite"); create_schema(store)
     candles=SqliteCandleRepository(store); signals=SqliteSignalRepository(store)
-    closes=[100,100,100,105,110,115,120,125,130,135,80]
+    closes=[100,100,100,105,110,115,120,125,130,135,135,135,135,135,135,80]
     built=[]
     for i,v in enumerate(closes):
         c=candle(i,v); candles.upsert(c); built.append(c)

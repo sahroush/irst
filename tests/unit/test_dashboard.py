@@ -54,11 +54,10 @@ def test_chart_api_returns_chronological_signal_markers(tmp_path):
     assert response.status_code == 200
     data = response.json()
     assert [candle["open"] for candle in data["candles"]] == [100, 101, 102]
-    assert [marker["time"] for marker in data["markers"]] == [
-        int(start.timestamp()) for start in starts
-    ]
-    assert [marker["position"] for marker in data["markers"]] == ["belowBar", "aboveBar", "aboveBar"]
+    assert data["markers"] == []
     assert len(data["supertrend_series"]) == len(data["candles"])
+    assert len(data["rsi_series"]) == len(data["candles"])
+    assert data["rsi_series"] == [None, None, None]
     assert set(data["candles"][0]) == {"start_time", "end_time", "timeframe", "open", "high", "low", "close", "volume", "status"}
     assert [c.open for c in c.candles_repo.get_series(instrument.id, "30m", limit=2)] == [101, 102]
 
@@ -123,7 +122,7 @@ def test_derived_daily_signals_and_markers_use_daily_supertrend_flips(tmp_path):
     instrument = c.instruments_repo.upsert(Instrument(symbol="A", isin="IRO1TEST0001"))
     day = datetime(2026, 9, 28, tzinfo=TEHRAN)
     days = []
-    while len(days) < 12:
+    while len(days) < 17:
         if day.weekday() in (5, 6, 0, 1, 2):
             days.append(day)
         day += timedelta(days=1)
@@ -131,10 +130,10 @@ def test_derived_daily_signals_and_markers_use_daily_supertrend_flips(tmp_path):
     for index, day in enumerate(days):
         for slot in range(7):
             start = day.replace(hour=9 + slot // 2, minute=(slot % 2) * 30)
-            close = 120 if index == 11 else 100
+            close = 120 if index == 16 else 100
             c.candles_repo.upsert(Candle(
                 instrument_id=instrument.id, timeframe="30m", start_time=start,
-                end_time=start + timedelta(minutes=30), open=100, high=121 if index == 11 else 101,
+                end_time=start + timedelta(minutes=30), open=100, high=121 if index == 16 else 101,
                 low=99, close=close, volume=1, trade_count=1, status=CandleStatus.CLOSED,
             ))
 
@@ -144,6 +143,8 @@ def test_derived_daily_signals_and_markers_use_daily_supertrend_flips(tmp_path):
         ("bullish", days[-1].replace(hour=9).isoformat())
     ]
     detail = client.get(f"/api/instruments/{instrument.id}?timeframe=1d").json()
+    assert len(detail["rsi_series"]) == len(detail["candles"])
+    assert detail["rsi_series"][-1] is not None
     assert [(marker["position"], marker["time"]) for marker in detail["markers"]] == [
         ("belowBar", int(days[-1].replace(hour=9).timestamp()))
     ]

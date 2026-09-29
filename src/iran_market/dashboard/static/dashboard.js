@@ -2,14 +2,14 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
-  const state = { timeframe: '', instruments: [], chart: null, instrumentId: null, poll: null, queryTimer: null, requestId: 0, chartPoints: [] };
+  const state = { timeframe: '', instruments: [], chart: null, rsiChart: null, instrumentId: null, poll: null, queryTimer: null, requestId: 0, chartPoints: [], rsiValues: [], rsiVisible: false, syncingRange: false };
   const els = {
     active: $('active'), building: $('building'), signalsCount: $('signals-count'), snapshot: $('snapshot'),
     health: $('health-badge'), search: $('search'), refresh: $('refresh'), instrumentRows: $('instrument-rows'),
     signalRows: $('signal-rows'), instrumentTotal: $('instrument-total'), error: $('page-error'),
     status: $('page-status'), updated: $('updated-at'), detail: $('detail'), detailTitle: $('detail-title'),
     timeframe: $('timeframe'), closeDetail: $('close-detail'), chart: $('market-chart'),
-    chartSummary: $('chart-summary'), chartEmpty: $('chart-empty'), marketState: $('market-state'), candleAge: $('candle-age'),
+    chartSummary: $('chart-summary'), chartEmpty: $('chart-empty'), marketState: $('market-state'), candleAge: $('candle-age'), rsiToggle: $('rsi-toggle'), rsiLegend: $('rsi-legend'), rsiPanel: $('rsi-panel'), rsiChart: $('rsi-chart'),
   };
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
   const num = (value) => Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
@@ -141,6 +141,7 @@
     const bullTrend = state.chart.addLineSeries({ color: '#39c992', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
     const bearTrend = state.chart.addLineSeries({ color: '#f0787b', lineWidth: 2, priceLineVisible: false, lastValueVisible: false, crosshairMarkerVisible: false });
     state.chart.__series = { candles, volume, bullTrend, bearTrend };
+    state.chart.timeScale().subscribeVisibleTimeRangeChange(() => syncChartRanges(state.chart.timeScale(), state.rsiChart?.timeScale()));
     state.chart.subscribeCrosshairMove((param) => {
       const candle = param.seriesData.get(candles);
       els.chartSummary.textContent = candle
@@ -148,6 +149,40 @@
         : state.chartPoints.length ? `${state.chartPoints.length} candles · hover chart for OHLCV` : 'No candle data';
     });
     return state.chart;
+  }
+  function createRSIChart() {
+    if (state.rsiChart || !window.LightweightCharts) return state.rsiChart;
+    const charts = window.LightweightCharts;
+    state.rsiChart = charts.createChart(els.rsiChart, {
+      autoSize: true,
+      layout: { background: { type: 'solid', color: '#141e2b' }, textColor: '#8c9bad', fontFamily: 'Inter, system-ui, sans-serif' },
+      grid: { vertLines: { color: '#243143' }, horzLines: { color: '#243143' } },
+      rightPriceScale: { borderColor: '#243143', scaleMargins: { top: 0.12, bottom: 0.12 } },
+      timeScale: { visible: false, borderVisible: false, rightOffset: 3 },
+      crosshair: { mode: charts.CrosshairMode?.Normal ?? 0 },
+    });
+    const line = state.rsiChart.addLineSeries({
+      color: '#76a9ff', lineWidth: 2, priceLineVisible: false, lastValueVisible: true,
+      crosshairMarkerVisible: false, autoscaleInfoProvider: () => ({ priceRange: { minValue: 0, maxValue: 100 } }),
+    });
+    for (const value of [30, 50, 70]) {
+      line.createPriceLine({ price: value, color: value === 50 ? '#8c9bad' : '#53657d', lineWidth: 1, lineStyle: 2, axisLabelVisible: value === 50, title: String(value) });
+    }
+    state.rsiChart.__series = { line };
+    state.rsiChart.timeScale().subscribeVisibleTimeRangeChange(() => syncChartRanges(state.rsiChart.timeScale(), state.chart?.timeScale()));
+    return state.rsiChart;
+  }
+  function setRSIData(values) {
+    if (!state.rsiChart) return;
+    state.rsiChart.__series.line.setData(rsiPoints(values, state.chartPoints));
+  }
+  function syncChartRanges(source, target) {
+    if (!source || !target || state.syncingRange) return;
+    const range = source.getVisibleRange();
+    if (!range) return;
+    state.syncingRange = true;
+    try { target.setVisibleRange(range); }
+    finally { state.syncingRange = false; }
   }
   function supertrendPoints(values, candles) {
     if (!Array.isArray(values)) return [];
@@ -168,6 +203,13 @@
       const bullish = marker.direction === 'bullish' || marker.position === 'belowBar';
       return [{ time, position: bullish ? 'belowBar' : 'aboveBar', color: bullish ? '#39c992' : '#f0787b', shape: bullish ? 'arrowUp' : 'arrowDown', text: marker.text || (bullish ? 'Buy' : 'Sell') }];
     }).sort((a, b) => a.time - b.time);
+  }
+  function rsiPoints(values, candles) {
+    if (!Array.isArray(values)) return [];
+    return values.flatMap((value, index) => {
+      if (value == null || !candles[index] || !Number.isFinite(Number(value))) return [];
+      return [{ time: candles[index].time, value: Number(value) }];
+    });
   }
   async function openInstrument(id) {
     if (!id) return;
@@ -191,21 +233,29 @@
         els.chartEmpty.hidden = false;
         els.candleAge.textContent = 'Candle: —';
         state.chartPoints = [];
+        state.rsiValues = [];
         if (state.chart) state.chart.__series.candles.setData([]), state.chart.__series.volume.setData([]), state.chart.__series.bullTrend.setData([]), state.chart.__series.bearTrend.setData([]);
+        if (state.rsiChart) setRSIData([]);
         return;
       }
       const chart = createChart();
       if (!chart) throw new Error('Lightweight Charts failed to load');
       const { candles, volume, bullTrend, bearTrend } = chart.__series;
       state.chartPoints = points;
+      state.rsiValues = data.rsi_series || [];
       candles.setData(points.map(({ time, open, high, low, close }) => ({ time, open, high, low, close })));
       volume.setData(points.map((item) => ({ time: item.time, value: item.volume, color: item.close >= item.open ? 'rgba(57,201,146,.42)' : 'rgba(240,120,123,.42)' })));
       const trendPoints = supertrendPoints(data.supertrend_series, points);
       bullTrend.setData(trendPoints.map((point) => point.bullish ? { time: point.time, value: point.value } : { time: point.time }));
       bearTrend.setData(trendPoints.map((point) => point.bullish ? { time: point.time } : { time: point.time, value: point.value }));
+      if (state.rsiChart) setRSIData(state.rsiValues);
       const markers = normalizeMarkers(data.markers);
       candles.setMarkers(markers.filter((marker) => points.some((point) => point.time === marker.time)));
       chart.timeScale().fitContent();
+      if (state.rsiChart) {
+        const range = chart.timeScale().getVisibleRange();
+        if (range) state.rsiChart.timeScale().setVisibleRange(range);
+      }
       const current = data.supertrend || {};
       els.chartSummary.textContent = `${points.length} ${tf || 'timeframe'} candles · last close ${num(points[points.length - 1].close)} · ${points[points.length - 1].status || 'unknown'} · Supertrend ${current.state || '—'}${current.value == null ? '' : ` at ${num(current.value)}`}`;
       els.candleAge.textContent = `Candle: ${ago(data.candles[data.candles.length - 1].start_time)}`;
@@ -222,7 +272,7 @@
     try {
       const config = await get('/api/config');
       const options = Array.isArray(config.available_timeframes) ? config.available_timeframes : [];
-      state.timeframe = options.includes(config.scanner_timeframe) ? config.scanner_timeframe : (options[0] || '');
+      state.timeframe = options.includes('1d') ? '1d' : (options.includes(config.scanner_timeframe) ? config.scanner_timeframe : (options[0] || ''));
       els.timeframe.innerHTML = options.map((timeframe) => `<option value="${esc(timeframe)}">${esc(timeframe)}</option>`).join('');
       els.timeframe.value = state.timeframe;
       return Boolean(state.timeframe);
@@ -247,10 +297,24 @@
     state.queryTimer = window.setTimeout(loadDashboard, 220);
   });
   els.refresh.addEventListener('click', loadDashboard);
+  els.rsiToggle.addEventListener('click', () => {
+    state.rsiVisible = !state.rsiVisible;
+    els.rsiToggle.setAttribute('aria-pressed', String(state.rsiVisible));
+    els.rsiToggle.textContent = `${state.rsiVisible ? 'Hide' : 'Show'} RSI (14)`;
+    els.rsiLegend.hidden = !state.rsiVisible;
+    els.rsiPanel.hidden = !state.rsiVisible;
+    if (state.rsiVisible) {
+      createRSIChart();
+      setRSIData(state.rsiValues);
+      const range = state.chart?.timeScale().getVisibleRange();
+      if (range) state.rsiChart.timeScale().setVisibleRange(range);
+    }
+  });
   els.closeDetail.addEventListener('click', () => {
     state.requestId++;
     state.instrumentId = null;
     state.chartPoints = [];
+    state.rsiValues = [];
     markSelection();
     els.detailTitle.textContent = 'Select instrument';
     els.chartSummary.textContent = 'Choose an instrument to load chart.';
@@ -261,6 +325,7 @@
       state.chart.__series.bullTrend.setData([]);
       state.chart.__series.bearTrend.setData([]);
     }
+    if (state.rsiChart) setRSIData([]);
   });
   els.timeframe.addEventListener('change', () => {
     state.timeframe = els.timeframe.value;
