@@ -20,8 +20,8 @@
       <div class="toolbar">
         <label for="timeframe">Global timeframe</label>
         <select id="timeframe" aria-label="Global timeframe"><option value="">Loading…</option></select>
-        <label class="search-label" for="search">Search instruments</label>
-        <input id="search" type="search" autocomplete="off" placeholder="Symbol, name, or ISIN">
+        <label class="search-label" for="search">Jump to instrument</label>
+        <input id="search" type="search" autocomplete="off" placeholder="Symbol, name, or ISIN — press Enter to open">
         <button id="refresh" class="button button-quiet" type="button">Refresh</button>
       </div>
     </header>
@@ -60,18 +60,6 @@
       </section>
 
       <aside class="side-stack">
-        <section class="panel instruments-panel" aria-labelledby="instruments-title">
-          <div class="panel-heading">
-            <div><p class="eyebrow">Universe</p><h2 id="instruments-title">Watchlist</h2></div>
-            <span id="instrument-total" class="subtle"></span>
-          </div>
-          <div class="table-scroll watchlist-scroll">
-            <table>
-              <thead><tr><th scope="col">Symbol</th><th scope="col">Close</th><th scope="col">Updated</th></tr></thead>
-              <tbody id="instrument-rows"><tr><td colspan="3" class="empty">Loading instruments…</td></tr></tbody>
-            </table>
-          </div>
-        </section>
         <section class="panel signals-panel" aria-labelledby="signals-title">
           <div class="panel-heading"><div><p class="eyebrow">Recent activity</p><h2 id="signals-title">Supertrend flips</h2></div></div>
           <div class="table-scroll">

@@ -190,3 +190,57 @@ def test_runtime_polls_marketwatch_when_market_closed(monkeypatch):
     runtime._reconcile_finished_day = no_reconcile
     asyncio.run(runtime.run_forever(stop, interval=1))
     assert polled.is_set()
+
+
+def test_poll_loop_keeps_polling_during_slow_reconciliation(monkeypatch):
+    """Reconciliation must not starve observation refreshes.
+
+    Awaiting the whole-universe reconcile inline blocked the poll loop for
+    minutes, so `live_snapshot_state` went stale past the health freshness
+    limit and the dashboard reported DEGRADED while polling was healthy.
+    """
+    import iran_market.runtime as runtime_module
+
+    now = datetime(2026, 9, 28, 15, 0, tzinfo=TEHRAN)
+    monkeypatch.setattr(runtime_module, "now_tehran", lambda: now)
+    stop = asyncio.Event()
+    polls: list[int] = []
+    reconcile_started = asyncio.Event()
+    release_reconcile = asyncio.Event()
+
+    class FakeRunner:
+        def __init__(self, *_args):
+            pass
+
+        async def once(self):
+            polls.append(1)
+            if len(polls) >= 3:
+                stop.set()
+
+    monkeypatch.setattr("iran_market.scanner.runner.LiveScannerRunner", FakeRunner)
+    container = SimpleNamespace(calendar=TradingCalendar(), settings=Settings.for_tests())
+    runtime = runtime_module.MarketRuntime(container, timeframe="30m")
+
+    async def slow_reconcile(day):
+        reconcile_started.set()
+        await release_reconcile.wait()
+
+    runtime._reconcile_finished_day = slow_reconcile
+
+    async def fast_wait(_stop_event, _timeout):
+        await asyncio.sleep(0)  # skip the 30s closed-market floor
+
+    monkeypatch.setattr(runtime_module.MarketRuntime, "_wait", staticmethod(fast_wait))
+
+    async def scenario():
+        task = asyncio.ensure_future(runtime.run_forever(stop, interval=0))
+        for _ in range(50):
+            await asyncio.sleep(0)
+            if len(polls) >= 3:
+                break
+        assert reconcile_started.is_set(), "reconciliation never started"
+        assert len(polls) >= 3, f"polling stalled at {len(polls)} polls while reconciling"
+        release_reconcile.set()
+        await task
+
+    asyncio.run(scenario())

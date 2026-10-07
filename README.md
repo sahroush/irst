@@ -38,9 +38,7 @@ A read-only FastAPI dashboard showing:
 - active instrument count;
 - live BUILDING candle count;
 - latest market snapshot age;
-- searchable instrument watchlist;
-- latest scanner-timeframe candle per instrument;
-- recent Supertrend flips;
+- recent Supertrend flips, each row opening that instrument's chart;
 - selected-instrument OHLC candlesticks, volume histogram, confirmed Supertrend overlay, and signal markers;
 - separate feed-observation and candle timestamps, with explicit empty/stale states.
 

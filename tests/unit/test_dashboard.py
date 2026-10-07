@@ -20,8 +20,17 @@ def test_dashboard_empty_and_instrument(tmp_path):
     assert 'id="market-chart"' in page.text
     assert 'Global timeframe' in page.text
     assert 'class="side-stack"' in page.text
+    # Watchlist panel is gone; Supertrend flips is the only sidebar list and
+    # the search box jumps straight to a match instead of listing results.
+    assert 'instrument-rows' not in page.text
+    assert 'Watchlist' not in page.text
+    assert 'Supertrend flips' in page.text
+    sidebar = page.text.split('side-stack', 1)[1]
+    assert sidebar.count('<section class="panel') == 1
     script = client.get('/static/dashboard.js').text
     assert 'class="instrument-select"' in script
+    assert 'renderInstruments' not in script
+    assert "event.key === 'Enter'" in script
     assert 'limit=500' not in script
     assert '/static/dashboard.css' in page.text
     assert '/static/dashboard.js' in page.text
@@ -31,6 +40,11 @@ def test_dashboard_empty_and_instrument(tmp_path):
     assert vendor.status_code == 200
     assert vendor.headers["content-encoding"] == "gzip"
     assert client.get('/static/vendor/VERSION.txt').text.strip() == 'Lightweight Charts 4.2.3'
+    # A stale cached dashboard.js against fresh index.html freezes the page on
+    # "Loading…" with no message, so static assets must always revalidate.
+    for path in ("/", "/static/dashboard.js", "/static/dashboard.css"):
+        assert client.get(path).headers["cache-control"] == "no-cache"
+    assert "cache-control" not in client.get("/api/health").headers
 
 
 def test_chart_api_returns_chronological_signal_markers(tmp_path):
@@ -148,6 +162,110 @@ def test_derived_daily_signals_and_markers_use_daily_supertrend_flips(tmp_path):
     assert [(marker["position"], marker["time"]) for marker in detail["markers"]] == [
         ("belowBar", int(days[-1].replace(hour=9).timestamp()))
     ]
+
+
+def test_derived_daily_signals_report_each_intraday_flip_time(tmp_path):
+    """1d flips must keep their own time, not the daily bar's 09:00 start.
+
+    The derived daily bar is stamped with the session window start, so a
+    coarse scan reported every flip at 09:00 and kept only one per day. The
+    intraday replay recovers the real flip time and keeps repeats.
+    """
+    c = build(Settings.for_tests(database_url=f"sqlite:///{tmp_path/'db.sqlite'}"))
+    instrument = c.instruments_repo.upsert(Instrument(symbol="A", isin="IRO1TEST0001"))
+    day = datetime(2026, 9, 28, tzinfo=TEHRAN)
+    days = []
+    while len(days) < 17:
+        if day.weekday() in (5, 6, 0, 1, 2):
+            days.append(day)
+        day += timedelta(days=1)
+
+    # Flat history, then an oscillating final day that flips several times.
+    for index, day_ in enumerate(days[:-1]):
+        for slot in range(7):
+            start = day_.replace(hour=9 + slot // 2, minute=(slot % 2) * 30)
+            c.candles_repo.upsert(Candle(
+                instrument_id=instrument.id, timeframe="30m", start_time=start,
+                end_time=start + timedelta(minutes=30), open=100, high=101, low=99,
+                close=100, volume=1, trade_count=1, status=CandleStatus.CLOSED,
+            ))
+    # Oscillate: each 30m close flips the daily Supertrend state.
+    closes = [120, 80, 130, 70, 140, 60, 150]
+    for slot, close in enumerate(closes):
+        start = days[-1].replace(hour=9 + slot // 2, minute=(slot % 2) * 30)
+        c.candles_repo.upsert(Candle(
+            instrument_id=instrument.id, timeframe="30m", start_time=start,
+            end_time=start + timedelta(minutes=30), open=100, high=close + 5,
+            low=close - 5, close=close, volume=1, trade_count=1,
+            status=CandleStatus.CLOSED,
+        ))
+
+    client = TestClient(create_app(c))
+    signals = client.get('/api/signals?timeframe=1d').json()
+    times = sorted({signal["candle_time"] for signal in signals})
+    # Flips are no longer all collapsed onto the daily bar start.
+    assert len(times) > 1, f"all flips still share one timestamp: {times}"
+    # The oscillating day is the newest bar, so every flip belongs to it.
+    assert {t[:10] for t in times} == {days[-1].date().isoformat()}, times
+    # Times are real session slots, and later than 09:00 is reachable.
+    assert {t[11:16] for t in times} <= {
+        "09:00", "09:30", "10:00", "10:30", "11:00", "11:30", "12:00",
+    }
+    assert any(t[11:16] != "09:00" for t in times), times
+
+
+def test_open_bar_flips_carry_own_rsi_verdict_and_provisional_flag(tmp_path):
+    """An intraday flip must be judged by RSI at its own time, not the bar's final RSI.
+
+    Emitting every open-bar flip under the coarse bar's closing RSI authorised
+    flips that their own RSI rejected (a bearish flip while RSI was still above
+    50). Such rows must be flagged unconfirmed, never silently confirmed.
+    """
+    c = build(Settings.for_tests(database_url=f"sqlite:///{tmp_path/'db.sqlite'}"))
+    instrument = c.instruments_repo.upsert(Instrument(symbol="A", isin="IRO1TEST0001"))
+    day = datetime(2026, 9, 28, tzinfo=TEHRAN)
+    days = []
+    while len(days) < 20:
+        if day.weekday() in (5, 6, 0, 1, 2):
+            days.append(day)
+        day += timedelta(days=1)
+
+    # Falling history (RSI below 50), then a final day that dips and spikes:
+    # the early bearish flip happens while the daily RSI is still too high for
+    # a bearish confirmation, even though the day ends bullish.
+    for d in days[:-1]:
+        for slot in range(7):
+            start = d.replace(hour=9 + slot // 2, minute=(slot % 2) * 30)
+            c.candles_repo.upsert(Candle(
+                instrument_id=instrument.id, timeframe="30m", start_time=start,
+                end_time=start + timedelta(minutes=30), open=90, high=92, low=88,
+                close=90, volume=1, trade_count=1, status=CandleStatus.CLOSED,
+            ))
+    for slot, close in enumerate([120, 90, 95, 100, 150, 200, 210]):
+        start = days[-1].replace(hour=9 + slot // 2, minute=(slot % 2) * 30)
+        status = CandleStatus.CLOSED if slot < 6 else CandleStatus.BUILDING
+        c.candles_repo.upsert(Candle(
+            instrument_id=instrument.id, timeframe="30m", start_time=start,
+            end_time=start + timedelta(minutes=30), open=100, high=close + 6,
+            low=close - 6, close=close, volume=1, trade_count=1, status=status,
+        ))
+
+    client = TestClient(create_app(c))
+    signals = client.get('/api/signals?timeframe=1d').json()
+    last_day = days[-1].date().isoformat()
+    open_bar = [s for s in signals if s["candle_time"].startswith(last_day)]
+    # Every transition inside the open bar is reported, in both directions.
+    assert len(open_bar) > 1, [(s["candle_time"], s["direction"]) for s in open_bar]
+    assert {s["direction"] for s in open_bar} == {"bullish", "bearish"}, open_bar
+    for signal in open_bar:
+        assert signal["provisional"] is True, signal
+    # The 09:30 bearish flip is rejected by the RSI of that moment (RSI still
+    # above 50). It must not inherit the closing bar's verdict, which confirms.
+    early_bear = [s for s in open_bar if s["direction"] == "bearish" and s["candle_time"].endswith("09:30:00+03:30")]
+    assert early_bear, open_bar
+    assert early_bear[0]["confirmed"] is False, early_bear[0]
+    # A flip that RSI did confirm is still distinguishable from the rejected one.
+    assert any(s["confirmed"] is True for s in open_bar), open_bar
 
 
 def test_current_daily_alert_uses_in_progress_bar(tmp_path):

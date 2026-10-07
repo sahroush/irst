@@ -2,11 +2,11 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
-  const state = { timeframe: '', instruments: [], chart: null, rsiChart: null, instrumentId: null, poll: null, queryTimer: null, requestId: 0, chartPoints: [], rsiValues: [], rsiVisible: false, syncingRange: false };
+  const state = { timeframe: '', chart: null, rsiChart: null, instrumentId: null, poll: null, requestId: 0, chartPoints: [], rsiValues: [], rsiVisible: false, syncingRange: false, seeded: false };
   const els = {
     active: $('active'), building: $('building'), signalsCount: $('signals-count'), snapshot: $('snapshot'),
-    health: $('health-badge'), search: $('search'), refresh: $('refresh'), instrumentRows: $('instrument-rows'),
-    signalRows: $('signal-rows'), instrumentTotal: $('instrument-total'), error: $('page-error'),
+    health: $('health-badge'), search: $('search'), refresh: $('refresh'),
+    signalRows: $('signal-rows'), error: $('page-error'),
     status: $('page-status'), updated: $('updated-at'), detail: $('detail'), detailTitle: $('detail-title'),
     timeframe: $('timeframe'), closeDetail: $('close-detail'), chart: $('market-chart'),
     chartSummary: $('chart-summary'), chartEmpty: $('chart-empty'), marketState: $('market-state'), candleAge: $('candle-age'), rsiToggle: $('rsi-toggle'), rsiLegend: $('rsi-legend'), rsiPanel: $('rsi-panel'), rsiChart: $('rsi-chart'),
@@ -23,7 +23,7 @@
     const seconds = Math.max(0, Math.floor((Date.now() - ms) / 1000));
     if (seconds < 60) return `${seconds}s ago`;
     if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
-    return new Date(ms).toLocaleString();
+    return new Date(ms).toLocaleString('en-GB', { timeZone: 'Asia/Tehran', day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
   };
   async function get(url) {
     const response = await fetch(url, { headers: { Accept: 'application/json' } });
@@ -39,50 +39,30 @@
     els.health.textContent = value;
     els.health.className = `health-badge ${value === 'HEALTHY' ? 'health-healthy' : value === 'DEGRADED' ? 'health-degraded' : value === 'UNHEALTHY' ? 'health-unhealthy' : ''}`;
   }
-  function renderInstruments(rows) {
-    state.instruments = Array.isArray(rows) ? rows : [];
-    els.instrumentTotal.textContent = `${state.instruments.length} shown`;
-    els.instrumentRows.innerHTML = state.instruments.map((item) => {
-      const label = item.symbol || item.isin || item.id;
-      return `<tr class="instrument-row ${state.instrumentId === item.id ? 'selected' : ''}">
-        <td><button class="instrument-select" type="button" data-instrument-id="${esc(item.id)}" aria-pressed="${state.instrumentId === item.id}" aria-label="Open chart for ${esc(label)}"><span class="instrument-name">${esc(label)}</span>${item.name && item.name !== label ? `<span class="sub-name">${esc(item.name)}</span>` : ''}</button></td>
-        <td>${esc(num(item.close))}</td><td>${esc(ago(item.updated_at))}</td>
-      </tr>`;
-    }).join('') || '<tr><td colspan="3" class="empty">No matching instruments.</td></tr>';
-  }
   function renderSignals(rows) {
     const signals = Array.isArray(rows) ? rows : [];
     els.signalRows.innerHTML = signals.map((signal) => {
       const up = signal.direction === 'bullish';
       const label = signal.symbol || signal.instrument_id || '—';
-      return `<tr class="${signal.instrument_id ? 'instrument-row' : ''}">
-        <td>${signal.instrument_id ? `<button class="instrument-select" type="button" data-instrument-id="${esc(signal.instrument_id)}" aria-label="Open chart for ${esc(label)}">${esc(label)}</button>` : esc(label)}</td><td class="${up ? 'direction-up' : 'direction-down'}">${up ? '▲' : '▼'} ${esc(signal.direction || '—')}</td><td>${esc(ago(signal.candle_time))}</td>
+      // Open-bar flips are revisable: the day can still invalidate them, and
+      // each carries its own RSI verdict rather than the bar's closing one.
+      const provisional = signal.provisional === true;
+      const classes = [signal.instrument_id ? 'instrument-row' : '', provisional ? 'provisional' : '', provisional && signal.confirmed !== true ? 'unconfirmed' : ''].filter(Boolean).join(' ');
+      const badge = provisional ? `<span class="signal-badge${signal.confirmed === true ? '' : ' signal-badge-weak'}" title="Flip inside the still-open ${esc(signal.timeframe || '')} bar; the close can still reverse it">${signal.confirmed === true ? 'PROV' : 'UNCONF'}</span>` : '';
+      return `<tr class="${classes}">
+        <td>${signal.instrument_id ? `<button class="instrument-select" type="button" data-instrument-id="${esc(signal.instrument_id)}" aria-label="Open chart for ${esc(label)}">${esc(label)}</button>` : esc(label)}${badge}</td><td class="${up ? 'direction-up' : 'direction-down'}">${up ? '▲' : '▼'} ${esc(signal.direction === 'bullish' ? 'bull' : 'bear')}</td><td>${esc(ago(signal.candle_time))}</td>
       </tr>`;
     }).join('') || '<tr><td colspan="3" class="empty">No signals yet.</td></tr>';
-  }
-  function markSelection() {
-    els.instrumentRows.querySelectorAll('.instrument-select').forEach((button) => {
-      const selected = button.dataset.instrumentId === state.instrumentId;
-      button.closest('tr').classList.toggle('selected', selected);
-      button.setAttribute('aria-pressed', String(selected));
-    });
   }
   async function loadDashboard() {
     if (!state.timeframe) return;
     try {
       setError();
       const timeframe = encodeURIComponent(state.timeframe);
-      const healthPromise = get('/api/health');
-      const signalsPromise = get(`/api/signals?limit=30&timeframe=${timeframe}`);
-      const instrumentsPromise = get(`/api/instruments?limit=100&timeframe=${timeframe}&q=${encodeURIComponent(els.search.value.trim())}`)
-        .then((instruments) => {
-          renderInstruments(instruments);
-          if (!state.instrumentId && instruments.length) openInstrument(instruments[0].id);
-          else if (state.instrumentId && state.chart) openInstrument(state.instrumentId);
-          markSelection();
-          return instruments;
-        });
-      const [health, signals] = await Promise.all([healthPromise, signalsPromise, instrumentsPromise]);
+      const [health, signals] = await Promise.all([
+        get('/api/health'),
+        get(`/api/signals?limit=30&timeframe=${timeframe}`),
+      ]);
       els.active.textContent = num(health.active_instruments);
       els.building.textContent = num(health.building_candles);
       els.signalsCount.textContent = num(health.signals);
@@ -90,6 +70,8 @@
       els.marketState.textContent = health.market_state || '—';
       updateHealth(health.status);
       renderSignals(signals);
+      if (state.instrumentId) await openInstrument(state.instrumentId);
+      else if (!state.seeded) { state.seeded = true; await openSearchMatch(); }
       els.updated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
       els.status.textContent = 'Dashboard updated';
     } catch (error) {
@@ -211,12 +193,27 @@
       return [{ time: candles[index].time, value: Number(value) }];
     });
   }
+  async function openSearchMatch() {
+    const query = els.search.value.trim();
+    const timeframe = encodeURIComponent(els.timeframe.value || state.timeframe);
+    let matches;
+    try {
+      matches = await get(`/api/instruments?limit=1&timeframe=${timeframe}&q=${encodeURIComponent(query)}`);
+    } catch (error) {
+      setError(`Instrument lookup failed: ${error.message}`);
+      return;
+    }
+    if (!matches.length) {
+      setError(query ? `No instrument matches "${query}".` : 'No instruments available.');
+      return;
+    }
+    await openInstrument(matches[0].id);
+  }
   async function openInstrument(id) {
     if (!id) return;
     setError();
     const request = ++state.requestId;
     state.instrumentId = id;
-    markSelection();
     els.detail.hidden = false;
     els.chartEmpty.hidden = true;
     els.chartSummary.textContent = 'Loading chart…';
@@ -288,13 +285,12 @@
     state.poll = window.setInterval(loadDashboard, 30000);
   }
 
-  for (const body of [els.instrumentRows, els.signalRows]) body.addEventListener('click', (event) => {
+  els.signalRows.addEventListener('click', (event) => {
     const button = event.target.closest('.instrument-select');
     if (button) openInstrument(button.dataset.instrumentId);
   });
-  els.search.addEventListener('input', () => {
-    window.clearTimeout(state.queryTimer);
-    state.queryTimer = window.setTimeout(loadDashboard, 220);
+  els.search.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter') { event.preventDefault(); openSearchMatch(); }
   });
   els.refresh.addEventListener('click', loadDashboard);
   els.rsiToggle.addEventListener('click', () => {
@@ -315,9 +311,8 @@
     state.instrumentId = null;
     state.chartPoints = [];
     state.rsiValues = [];
-    markSelection();
     els.detailTitle.textContent = 'Select instrument';
-    els.chartSummary.textContent = 'Choose an instrument to load chart.';
+    els.chartSummary.textContent = 'Pick a signal or type an instrument above to load a chart.';
     els.candleAge.textContent = 'Candle: —';
     if (state.chart) {
       state.chart.__series.candles.setData([]);

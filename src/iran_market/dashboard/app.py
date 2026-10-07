@@ -35,6 +35,53 @@ def _timeframes(stored: set[str], default: str | None = None) -> list[str]:
     return sorted(values, key=lambda code: (order[code[-1]], int(code[:-1])))
 
 
+def _intraday_flips(indicator, instrument_id, daily: list[Candle], sub_bars: list[Candle]) -> list[tuple[str, str, bool]]:
+    """Supertrend flips inside a still-open higher-timeframe bar, with their own time.
+
+    A derived 1d/1h bar is stamped with its window start, so scanning the
+    coarse series alone reports every flip of the current day at 09:00 and
+    keeps at most one per day. Replaying the source bars into the partial bar
+    shows when the state actually changed (09:00, 10:30, 11:00 ...) and keeps
+    repeats.
+
+    Each flip is confirmed by the RSI *as of that flip*, not by the coarse
+    bar's final RSI: the bar's end-of-day reading authorises nothing that
+    happened hours earlier. Returns (iso_time, state, rsi_confirmed).
+    """
+    if len(daily) < 2 or not sub_bars:
+        return []
+    prior, current = daily[:-1], daily[-1]
+    states, _ = indicator._series(provisional_candles(prior)) if prior else ([], [])
+    previous = states[-1] if states else None
+    high = low = None
+    volume = 0
+    flips: list[tuple[str, str, bool]] = []
+    for bar in sub_bars:
+        high = bar.high if high is None else max(high, bar.high)
+        low = bar.low if low is None else min(low, bar.low)
+        volume += bar.volume or 0
+        partial = Candle(
+            instrument_id=instrument_id, timeframe=current.timeframe,
+            start_time=current.start_time, end_time=bar.end_time,
+            open=bar.open, high=high, low=low, close=bar.close,
+            volume=volume, trade_count=0, status=CandleStatus.BUILDING, source="derived",
+        )
+        closed = provisional_candles(list(prior) + [partial])
+        series, _ = indicator._series(closed)
+        state = series[-1]
+        if previous is not None and state != previous and "UNKNOWN" not in (state, previous):
+            # RSI recomputed over the closes known at this flip only.
+            rsi_now = rsi_series([float(b.close) for b in closed])
+            direction = "bullish" if state == "BULLISH" else "bearish"
+            confirmed = rsi_confirms(
+                direction, rsi_now[-1],
+                rsi_now[-2] if len(rsi_now) > 1 else None,
+            )
+            flips.append((bar.start_time.isoformat(), state, confirmed))
+        previous = state
+    return flips
+
+
 def _chart_series(c, instrument_id, timeframe: str, limit: int, stored: set[str]) -> list[Candle]:
     if timeframe in stored or timeframe not in {"1h", "1d"} or "30m" not in stored:
         return c.candles_repo.get_series(instrument_id, timeframe, limit=limit) if timeframe in stored else []
@@ -88,6 +135,7 @@ def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrume
                 output.append({
                     "id": row["id"], "instrument_id": row["instrument_id"], "symbol": row["symbol"],
                     "direction": direction, "candle_time": row["candle_time"],
+                    "provisional": False, "confirmed": True,
                     "scanner_name": row["scanner_name"], "timeframe": timeframe,
                 })
         return output
@@ -103,17 +151,44 @@ def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrume
         usable = provisional_candles(candles)
         states, _ = indicator._series(usable) if usable else ([], [])
         rsi_values = rsi_series([float(bar.close) for bar in usable])
+        # A derived bar carries its window's start time, so a coarse scan would
+        # report each flip of the open period at 09:00 and drop the ones that
+        # follow it. Replay the source bars so every intraday flip is kept and
+        # carries the time it actually happened.
+        intraday: list[tuple[str, str, bool]] = []
+        if timeframe not in stored and candles and candles[-1].start_time == usable[-1].start_time:
+            subs = c.candles_repo.get_series(
+                instrument.id, "30m", start=candles[-1].start_time,
+                end=candles[-1].end_time,
+            )
+            intraday = _intraday_flips(indicator, instrument.id, candles, subs)
         for index in range(1, len(usable)):
             if states[index] == states[index - 1] or "UNKNOWN" in (states[index], states[index - 1]):
                 continue
             direction = "bullish" if states[index] == "BULLISH" else "bearish"
+            base = usable[index].start_time.isoformat()
+            # The open bar's flips are provisional: the day can still invalidate
+            # each one before it closes, so report every transition with its own
+            # RSI verdict instead of letting the closing bar authorise all of them.
+            if base == usable[-1].start_time.isoformat() and intraday:
+                for stamp, state, confirmed in intraday:
+                    signals.append({
+                        "id": f"{instrument.id}:{timeframe}:{stamp}",
+                        "instrument_id": str(instrument.id), "symbol": instrument.symbol,
+                        "direction": "bullish" if state == "BULLISH" else "bearish",
+                        "candle_time": stamp,
+                        "provisional": True, "confirmed": confirmed,
+                        "scanner_name": "supertrend", "timeframe": timeframe,
+                    })
+                continue
             if not rsi_confirms(direction, rsi_values[index], rsi_values[index - 1]):
                 continue
             signals.append({
-                "id": f"{instrument.id}:{timeframe}:{usable[index].start_time.isoformat()}",
+                "id": f"{instrument.id}:{timeframe}:{base}",
                 "instrument_id": str(instrument.id), "symbol": instrument.symbol,
                 "direction": direction,
-                "candle_time": usable[index].start_time.isoformat(),
+                "candle_time": base,
+                "provisional": False, "confirmed": True,
                 "scanner_name": "supertrend", "timeframe": timeframe,
             })
     return sorted(signals, key=lambda signal: signal["candle_time"], reverse=True)[:limit]
@@ -125,6 +200,18 @@ def create_app(container=None) -> FastAPI:
     app.add_middleware(GZipMiddleware, minimum_size=1000)
     app.state.container = c
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+
+    @app.middleware("http")
+    async def revalidate_static(request, call_next):
+        # index.html and the scripts it pulls in are edited as one unit, so a
+        # cached script against fresh markup breaks the page silently. Let the
+        # browser store the asset but always revalidate: StaticFiles answers
+        # 304 when the file is unchanged, so the vendored chart bundle still
+        # costs one conditional request.
+        response = await call_next(request)
+        if request.url.path.startswith("/static/") or request.url.path == "/":
+            response.headers["Cache-Control"] = "no-cache"
+        return response
 
     @app.get("/")
     def root():

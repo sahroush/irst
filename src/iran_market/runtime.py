@@ -116,6 +116,7 @@ class MarketRuntime:
         )
         self.reconciler = ReconciliationService(container)
         self._reconciled_days: set = set()
+        self._reconcile_task: asyncio.Future | None = None
 
     async def catch_up(self, *, sync_registry: bool = True) -> dict:
         """Startup historical bootstrap: registry sync + resumable prefetch."""
@@ -150,13 +151,34 @@ class MarketRuntime:
                     # Refresh observation state before potentially slow reconciliation.
                     await runner.once()
                     # Market closed: finalize + reconcile the just-finished session.
-                    await self._reconcile_finished_day(now.date())
+                    self._schedule_reconcile(stop_event, now.date())
                     await self._wait(stop_event, max(interval, 30.0))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.error("runtime loop error", extra={"error": f"{type(exc).__name__}: {exc}"})
                 await self._wait(stop_event, max(interval, 30.0))
+
+    def _schedule_reconcile(self, stop_event: asyncio.Event, day) -> None:
+        """Run day reconciliation alongside polling, never blocking it.
+
+        Reconciliation fetches trade history for the whole universe and takes
+        minutes. Awaiting it inline starved `live_snapshot_state` refreshes and
+        tripped the dashboard's feed-health freshness check to DEGRADED even
+        though polling was healthy.
+        """
+        if day in self._reconciled_days or self._reconcile_task is not None:
+            return
+        self._reconcile_task = asyncio.ensure_future(self._reconcile_finished_day(day))
+        self._reconcile_task.add_done_callback(self._on_reconcile_done)
+
+    def _on_reconcile_done(self, task: asyncio.Future) -> None:
+        self._reconcile_task = None
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            log.error("reconciliation task failed", extra={"error": f"{type(exc).__name__}: {exc}"})
 
     async def run_with_catch_up(self, stop_event: asyncio.Event, interval: float) -> None:
         """Run live polling immediately; bootstrap historical data in background."""
