@@ -307,6 +307,117 @@ def test_current_daily_alert_uses_in_progress_bar(tmp_path):
     ]
 
 
+def test_tradeability_gate_filters_small_and_locked_instruments(tmp_path):
+    """Signals only from instruments that can actually be traded.
+
+    Small names (tiny settled value) and limit-locked names (one price all
+    session, no price discovery) cannot be filled either side. Both must be
+    dropped from every signal path: persisted scanner signals and live
+    derived-timeframe flips.
+    """
+    c = build(Settings.for_tests(
+        database_url=f"sqlite:///{tmp_path/'db.sqlite'}",
+        min_traded_value=100_000.0,
+        min_price_discovery=3,
+    ))
+    liquid = c.instruments_repo.upsert(Instrument(symbol="فولاد", isin="IRO1TEST0001"))
+    small = c.instruments_repo.upsert(Instrument(symbol="سپ", isin="IRO1TEST0002"))
+    locked = c.instruments_repo.upsert(Instrument(symbol="وغدیر", isin="IRO1TEST0003"))
+    day = datetime(2026, 9, 28, tzinfo=TEHRAN)
+    days = []
+    while len(days) < 17:
+        if day.weekday() in (5, 6, 0, 1, 2):
+            days.append(day)
+        day += timedelta(days=1)
+
+    def bars(instrument, day, closes, volume):
+        for slot, close in enumerate(closes):
+            start = day.replace(hour=9 + slot)
+            c.candles_repo.upsert(Candle(
+                instrument_id=instrument.id, timeframe="30m", start_time=start,
+                end_time=start + timedelta(minutes=30), open=100, high=close + 5,
+                low=close - 5, close=close, volume=volume, trade_count=1,
+                status=CandleStatus.CLOSED,
+            ))
+
+    # Flat history (distinct days, one bar each) so Supertrend has state, then
+    # three distinct closes on the final day so the instrument flips.
+    for instrument in (liquid, small, locked):
+        for prev in days[:-1]:
+            bars(instrument, prev, [100], 1000)
+    bars(liquid, days[-1], [120, 130, 140], 5000)   # value ~1.95M rial passes the 100k gate
+    bars(small, days[-1], [120, 130, 140], 10)      # value ~3.9k rial fails
+    bars(locked, days[-1], [240, 240, 240], 5000)   # one distinct close: locked, fails discovery
+
+    # Persisted scanner path: plant one flip row per instrument (the scanner
+    # runs separately from the dashboard) and let the gate filter them.
+    from iran_market.models import Signal
+    for instrument in (liquid, small, locked):
+        c.store.connect().execute(
+            "INSERT INTO signals (id, scanner_name, instrument_id, timeframe, candle_time, signal_type, direction, indicator_name, parameters, payload, created_at) VALUES (?, 'supertrend', ?, '30m', ?, 'supertrend_flip', 'bullish', 'supertrend', '{}', ?, ?)",
+            (f"test-{instrument.id}", str(instrument.id), days[-1].replace(hour=9).isoformat(), '{"rsi": 60.0, "previous_rsi": 55.0}', datetime.now(TEHRAN).isoformat()),
+        )
+        c.store.connect().commit()
+
+    client = TestClient(create_app(c))
+    # 30m: persisted rows must be gated - only the liquid instrument survives.
+    symbols = {s["symbol"] for s in client.get("/api/signals?timeframe=30m&limit=500").json()}
+    assert "فولاد" in symbols, f"30m: liquid instrument must still signal, got {symbols}"
+    assert "سپ" not in symbols, f"30m: small instrument must be dropped, got {symbols}"
+    assert "وغدیر" not in symbols, f"30m: locked instrument must be dropped, got {symbols}"
+    # 1d: live derived path must apply the same gate per instrument.
+    symbols = {s["symbol"] for s in client.get("/api/signals?timeframe=1d&limit=500").json()}
+    assert "فولاد" in symbols, f"1d: liquid instrument must still signal, got {symbols}"
+    assert "سپ" not in symbols, f"1d: small instrument must be dropped, got {symbols}"
+    assert "وغدیر" not in symbols, f"1d: locked instrument must be dropped, got {symbols}"
+
+
+def test_liquidity_gate_falls_back_to_previous_session_at_open(tmp_path):
+    """Opening minutes must not drop fresh signals from liquid names.
+
+    The gate reads the latest session with closed 30m bars; when the current
+    session has barely started (under 50 instruments with bars), it falls back
+    to the previous session instead of reporting every instrument untradeable.
+    """
+    c = build(Settings.for_tests(
+        database_url=f"sqlite:///{tmp_path/'db.sqlite'}",
+        min_traded_value=100_000.0,
+        min_price_discovery=3,
+    ))
+    instrument = c.instruments_repo.upsert(Instrument(symbol="A", isin="IRO1TEST0001"))
+    # 17 sessions ending 2026-09-27: only that last day has bars in the DB
+    # (earlier days are left empty), so the gate's latest-session query finds
+    # exactly one instrument-day with data - the fallback keeps it tradeable.
+    day0 = datetime(2026, 9, 27, tzinfo=TEHRAN)
+    days = []
+    day = day0
+    while len(days) < 17:
+        if day.weekday() in (5, 6, 0, 1, 2):
+            days.append(day)
+        day += timedelta(days=1)
+    for prev in days[:-1]:
+        start = prev.replace(hour=9)
+        c.candles_repo.upsert(Candle(
+            instrument_id=instrument.id, timeframe="30m", start_time=start,
+            end_time=start + timedelta(minutes=30), open=100, high=105, low=95,
+            close=100, volume=5000, trade_count=1, status=CandleStatus.CLOSED,
+        ))
+    for slot, close in enumerate((120, 130, 140)):
+        start = days[-1].replace(hour=9 + slot)
+        c.candles_repo.upsert(Candle(
+            instrument_id=instrument.id, timeframe="30m", start_time=start,
+            end_time=start + timedelta(minutes=30), open=100, high=close + 5,
+            low=close - 5, close=close, volume=5000, trade_count=1,
+            status=CandleStatus.CLOSED,
+        ))
+
+    client = TestClient(create_app(c))
+    # No bars after the last session: the gate falls back to it and the
+    # instrument still signals on the live derived path.
+    signals = client.get("/api/signals?timeframe=1d&limit=500").json()
+    assert any(s["symbol"] == "A" for s in signals), signals
+
+
 def test_closed_market_health_checks_last_session_snapshot(tmp_path, monkeypatch):
     from iran_market.monitoring import health
 

@@ -115,6 +115,56 @@ def _chart_series(c, instrument_id, timeframe: str, limit: int, stored: set[str]
     return result[-limit:]
 
 
+def _liquidity(c, day: str | None = None) -> dict[str, tuple[float, int]]:
+    """Settled traded value (rial) and distinct closes per instrument for a day.
+
+    Tradeability gate grounded in the data: small names trade 2-9B rial/day
+    and limit-locked names print one price all session (candle high-low range
+    is 0.00% for them, so range cannot detect the lock - distinct closes can).
+    Uses CLOSED 30m bars only: the BUILDING bar carries cumulative day volume,
+    so including it double-counts. `day=None` means the latest session that
+    has closed 30m bars, with a fallback to the previous session when the
+    current one has barely started (opening minutes would otherwise drop
+    fresh signals from liquid names).
+    """
+    conn = c.store.connect()
+    if day is None:
+        day = conn.execute(
+            "SELECT MAX(substr(start_time,1,10)) FROM candles WHERE timeframe='30m' AND status='CLOSED'"
+        ).fetchone()[0]
+    rows = conn.execute(
+        """SELECT instrument_id, SUM(volume*close) as value, COUNT(DISTINCT close) as closes
+           FROM candles
+           WHERE timeframe='30m' AND status='CLOSED' AND substr(start_time,1,10)=?
+           GROUP BY instrument_id""",
+        (day,),
+    ).fetchall()
+    gate = {row["instrument_id"]: (row["value"] or 0.0, row["closes"]) for row in rows}
+    if len(gate) < 50:
+        prev = conn.execute(
+            """SELECT MAX(substr(start_time,1,10)) FROM candles
+               WHERE timeframe='30m' AND status='CLOSED' AND substr(start_time,1,10)<?""",
+            (day,),
+        ).fetchone()[0]
+        if prev:
+            for row in conn.execute(
+                """SELECT instrument_id, SUM(volume*close) as value, COUNT(DISTINCT close) as closes
+                   FROM candles
+                   WHERE timeframe='30m' AND status='CLOSED' AND substr(start_time,1,10)=?
+                   GROUP BY instrument_id""",
+                (prev,),
+            ).fetchall():
+                gate.setdefault(row["instrument_id"], (row["value"] or 0.0, row["closes"]))
+    return gate
+
+
+def _tradeable(c, gate: dict[str, tuple[float, int]], instrument_id) -> bool:
+    """True when the instrument clears both tradeability thresholds."""
+    value, closes = gate.get(str(instrument_id), (0.0, 0))
+    return (value >= c.settings.min_traded_value
+            and closes >= c.settings.min_price_discovery)
+
+
 def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrument_id=None) -> list[dict]:
     if timeframe == c.settings.scanner_timeframe and timeframe in stored:
         sql = """SELECT s.*, i.symbol FROM signals s
@@ -127,10 +177,13 @@ def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrume
         sql += " ORDER BY s.candle_time DESC LIMIT ?"
         params.append(limit)
         rows = c.store.connect().execute(sql, params).fetchall()
+        gate = _liquidity(c)
         output = []
         for row in rows:
             payload = json.loads(row["payload"] or "{}")
             direction = row["direction"]
+            if not _tradeable(c, gate, row["instrument_id"]):
+                continue
             if rsi_confirms(direction, payload.get("rsi"), payload.get("previous_rsi")):
                 output.append({
                     "id": row["id"], "instrument_id": row["instrument_id"], "symbol": row["symbol"],
@@ -144,6 +197,11 @@ def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrume
     instruments = c.instruments_repo.list_active()
     if instrument_id is not None:
         instruments = [item for item in instruments if item.id == instrument_id]
+    else:
+        # Small or limit-locked names cannot be filled either side: skip them
+        # before any indicator work instead of filtering signals afterwards.
+        gate = _liquidity(c)
+        instruments = [item for item in instruments if _tradeable(c, gate, item.id)]
     for instrument in instruments:
         candles = _chart_series(c, instrument.id, timeframe, 120, stored)
         # The in-progress period participates on available prices, so the

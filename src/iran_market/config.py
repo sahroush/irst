@@ -18,6 +18,10 @@ DEFAULTS = {
     "HTTP_BACKOFF_CAP": "30.0",
     "MARKET_WATCH_INTERVAL_SECONDS": "15",
     "SCANNER_TIMEFRAME": "30m",
+    # Tradeability gate for signals: settled day value (rial) and minimum
+    # distinct closes in the day's bars (price discovery / not limit-locked).
+    "MIN_TRADED_VALUE": "30000000000",
+    "MIN_PRICE_DISCOVERY": "3",
     "TEHRAN_TIMEZONE": "Asia/Tehran",
     "RAW_ARCHIVE_ENABLED": "0",
     "RAW_ARCHIVE_DIR": "data/raw",
@@ -40,6 +44,8 @@ class Settings:
     http_backoff_cap: float = float(DEFAULTS["HTTP_BACKOFF_CAP"])
     market_watch_interval_seconds: float = float(DEFAULTS["MARKET_WATCH_INTERVAL_SECONDS"])
     scanner_timeframe: str = DEFAULTS["SCANNER_TIMEFRAME"]
+    min_traded_value: float = float(DEFAULTS["MIN_TRADED_VALUE"])
+    min_price_discovery: int = int(float(DEFAULTS["MIN_PRICE_DISCOVERY"]))
     timezone: ZoneInfo = _TEHRAN
     raw_archive_enabled: bool = False
     raw_archive_dir: str = DEFAULTS["RAW_ARCHIVE_DIR"]
@@ -64,6 +70,8 @@ class Settings:
                 _get("MARKET_WATCH_INTERVAL_SECONDS", DEFAULTS["MARKET_WATCH_INTERVAL_SECONDS"])
             ),
             scanner_timeframe=_get("SCANNER_TIMEFRAME", DEFAULTS["SCANNER_TIMEFRAME"]),
+            min_traded_value=float(_get("MIN_TRADED_VALUE", DEFAULTS["MIN_TRADED_VALUE"])),
+            min_price_discovery=int(_get("MIN_PRICE_DISCOVERY", DEFAULTS["MIN_PRICE_DISCOVERY"])),
             raw_archive_enabled=_get("RAW_ARCHIVE_ENABLED", "0").lower() in ("1", "true", "yes"),
             raw_archive_dir=_get("RAW_ARCHIVE_DIR", DEFAULTS["RAW_ARCHIVE_DIR"]),
             database_url=_get("DATABASE_URL", DEFAULTS["DATABASE_URL"]),
@@ -80,6 +88,10 @@ class Settings:
             http_backoff_base=0.01,
             http_backoff_cap=0.05,
             raw_archive_enabled=False,
+            # Synthetic test candles are tiny; disable the tradeability gate so
+            # signal tests exercise indicator logic, not liquidity.
+            min_traded_value=0.0,
+            min_price_discovery=0,
         )
         base.update(overrides)
         return cls(**base)
