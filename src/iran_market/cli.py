@@ -199,6 +199,20 @@ async def cmd_health(args, c) -> int:
     return 0
 
 
+async def cmd_prune(args, c) -> int:
+    from .storage.sqlite import prune_before
+    days = args.days if args.days is not None else c.settings.retention_days
+    report = prune_before(c.store, days)
+    _print(report, args.json)
+    if not args.json:
+        total = sum(report.values())
+        if total:
+            print(f"pruned {total} rows across {len(report)} tables")
+        else:
+            print(f"nothing to prune (retention_days={days})")
+    return 0
+
+
 async def cmd_demo(args, c) -> int:
     """Populate the dashboard with real historical data, even outside market hours."""
     from .services.demo import DemoBootstrapService
@@ -383,6 +397,11 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_signals)
 
     sub.add_parser("health").set_defaults(func=cmd_health)
+
+    p = sub.add_parser("prune", help="delete rows older than RETENTION_DAYS, then VACUUM")
+    p.add_argument("--days", type=int, default=None,
+                   help="override RETENTION_DAYS setting (0 to disable)")
+    p.set_defaults(func=cmd_prune)
 
     p = sub.add_parser("demo", help="populate dashboard from real TSETMC history")
     p.add_argument("--symbol", default="فولاد")

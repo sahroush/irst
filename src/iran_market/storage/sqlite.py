@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from threading import RLock
 from uuid import UUID
@@ -580,6 +580,38 @@ class SqliteSignalRepository(SignalRepository):
 def open_sqlite_store(database_url: str) -> SqliteStore:
     """'sqlite:///path' or bare path -> SqliteStore."""
     return SqliteStore(database_url)
+
+
+def prune_before(store: SqliteStore, days: int, *, now: datetime | None = None) -> dict:
+    """Delete candles/trades/signals/fetch_runs older than `days`, then VACUUM.
+
+    days <= 0 disables. All timestamps are Tehran-local ISO strings; comparisons
+    are lexicographic and safe because every writer uses the same +03:30 offset.
+    """
+    if days is None or days <= 0:
+        return {}
+    from ..timeutil import now_tehran
+    cutoff = (now or now_tehran()) - timedelta(days=days)
+    conn = store.connect()
+    report = {}
+    with conn:
+        report["candles"] = conn.execute(
+            "DELETE FROM candles WHERE start_time < ?", (cutoff.isoformat(),)
+        ).rowcount
+        report["trades"] = conn.execute(
+            "DELETE FROM trades WHERE trade_date < ?", (cutoff.date().isoformat(),)
+        ).rowcount
+        report["signals"] = conn.execute(
+            "DELETE FROM signals WHERE candle_time < ?", (cutoff.isoformat(),)
+        ).rowcount
+        report["fetch_runs"] = conn.execute(
+            "DELETE FROM fetch_runs WHERE started_at < ?",
+            (cutoff.replace(tzinfo=None).isoformat(),),
+        ).rowcount
+    if any(report.values()):
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.execute("VACUUM")
+    return report
 
 
 def create_schema(store: SqliteStore) -> None:

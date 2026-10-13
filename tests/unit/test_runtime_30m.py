@@ -244,3 +244,48 @@ def test_poll_loop_keeps_polling_during_slow_reconciliation(monkeypatch):
         await task
 
     asyncio.run(scenario())
+
+
+def test_runtime_prunes_once_per_day_in_closed_market(monkeypatch):
+    """Closed-market branch calls prune_before exactly once per day; retention
+    days=0 skips it entirely."""
+    import iran_market.runtime as runtime_module
+
+    now = datetime(2026, 9, 28, 15, 0, tzinfo=TEHRAN)  # after 12:30 close
+    monkeypatch.setattr(runtime_module, "now_tehran", lambda: now)
+    stop = asyncio.Event()
+    calls: list[int] = []
+
+    class FakeRunner:
+        def __init__(self, *_args):
+            pass
+
+        async def once(self):
+            stop.set()
+
+    monkeypatch.setattr("iran_market.scanner.runner.LiveScannerRunner", FakeRunner)
+    monkeypatch.setattr(
+        runtime_module, "prune_before",
+        lambda store, days: calls.append(days) or {"candles": 0, "trades": 0,
+                                                   "signals": 0, "fetch_runs": 0},
+    )
+    container = SimpleNamespace(calendar=TradingCalendar(),
+                                settings=Settings.for_tests(retention_days=90),
+                                store=None)
+    runtime = runtime_module.MarketRuntime(container, timeframe="30m")
+    asyncio.run(runtime.run_forever(stop, interval=0))
+    assert calls == [90]
+
+    # retention disabled -> no prune call
+    calls.clear()
+    container.settings = Settings.for_tests(retention_days=0)
+    runtime2 = runtime_module.MarketRuntime(container, timeframe="30m")
+    stop2 = asyncio.Event()
+
+    class FakeRunner2(FakeRunner):
+        async def once(self):
+            stop2.set()
+
+    monkeypatch.setattr("iran_market.scanner.runner.LiveScannerRunner", FakeRunner2)
+    asyncio.run(runtime2.run_forever(stop2, interval=0))
+    assert calls == []

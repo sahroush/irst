@@ -25,4 +25,5 @@ __all__ = [
     "SqliteCandleRepository", "SqliteFetchRunRepository",
     "SqliteLiveStateRepository", "SqliteSignalRepository",
     "open_sqlite_store", "create_schema",
+    "prune_before",
 ]

@@ -23,6 +23,10 @@ DEFAULTS = {
     "MIN_TRADED_VALUE": "30000000000",
     "MIN_PRICE_DISCOVERY": "3",
     "TEHRAN_TIMEZONE": "Asia/Tehran",
+    # Retention: delete candles/trades/signals/fetch_runs older than N days
+    # (Tehran time), then VACUUM. 0 disables. trades dominate DB size (~1.5M
+    # rows/session); 30d ≈ 9-10 GB steady state on the current universe.
+    "RETENTION_DAYS": "30",
     "RAW_ARCHIVE_ENABLED": "0",
     "RAW_ARCHIVE_DIR": "data/raw",
     "DATABASE_URL": "sqlite:///data/iran_market.db",
@@ -44,6 +48,7 @@ class Settings:
     http_backoff_cap: float = float(DEFAULTS["HTTP_BACKOFF_CAP"])
     market_watch_interval_seconds: float = float(DEFAULTS["MARKET_WATCH_INTERVAL_SECONDS"])
     scanner_timeframe: str = DEFAULTS["SCANNER_TIMEFRAME"]
+    retention_days: int = int(DEFAULTS["RETENTION_DAYS"])
     min_traded_value: float = float(DEFAULTS["MIN_TRADED_VALUE"])
     min_price_discovery: int = int(float(DEFAULTS["MIN_PRICE_DISCOVERY"]))
     timezone: ZoneInfo = _TEHRAN
@@ -70,6 +75,7 @@ class Settings:
                 _get("MARKET_WATCH_INTERVAL_SECONDS", DEFAULTS["MARKET_WATCH_INTERVAL_SECONDS"])
             ),
             scanner_timeframe=_get("SCANNER_TIMEFRAME", DEFAULTS["SCANNER_TIMEFRAME"]),
+            retention_days=int(_get("RETENTION_DAYS", DEFAULTS["RETENTION_DAYS"])),
             min_traded_value=float(_get("MIN_TRADED_VALUE", DEFAULTS["MIN_TRADED_VALUE"])),
             min_price_discovery=int(_get("MIN_PRICE_DISCOVERY", DEFAULTS["MIN_PRICE_DISCOVERY"])),
             raw_archive_enabled=_get("RAW_ARCHIVE_ENABLED", "0").lower() in ("1", "true", "yes"),

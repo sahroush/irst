@@ -20,6 +20,7 @@ from .registry.sync import RegistrySyncService
 from .scanner.service import ScannerConfig, ScannerService
 from .services.history import TradeHistoryCollector
 from .services.prefetch import PrefetchService
+from .storage.sqlite import prune_before
 from .timeutil import now_tehran
 
 log = get_logger("runtime")
@@ -117,6 +118,7 @@ class MarketRuntime:
         self.reconciler = ReconciliationService(container)
         self._reconciled_days: set = set()
         self._reconcile_task: asyncio.Future | None = None
+        self._pruned_days: set = set()
 
     async def catch_up(self, *, sync_registry: bool = True) -> dict:
         """Startup historical bootstrap: registry sync + resumable prefetch."""
@@ -152,12 +154,33 @@ class MarketRuntime:
                     await runner.once()
                     # Market closed: finalize + reconcile the just-finished session.
                     self._schedule_reconcile(stop_event, now.date())
+                    self._maybe_prune(now.date())
                     await self._wait(stop_event, max(interval, 30.0))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log.error("runtime loop error", extra={"error": f"{type(exc).__name__}: {exc}"})
                 await self._wait(stop_event, max(interval, 30.0))
+
+    def _maybe_prune(self, day) -> None:
+        """Once per day: delete rows older than retention_days, then VACUUM.
+
+        Runs inline (market is closed, no polling pressure) but is skipped when
+        retention_days=0. VACUUM can take minutes on a large trades table; the
+        market-closed branch polls at 30s so a slow prune only delays the next
+        closed-market poll, not live candle building.
+        """
+        days = self.c.settings.retention_days
+        if days <= 0 or day in self._pruned_days:
+            return
+        self._pruned_days.add(day)
+        try:
+            report = prune_before(self.c.store, days)
+            if any(report.values()):
+                log.info("retention prune", extra=report)
+        except Exception as exc:
+            self._pruned_days.discard(day)  # retry next closed-market pass
+            log.error("retention prune failed", extra={"error": f"{type(exc).__name__}: {exc}"})
 
     def _schedule_reconcile(self, stop_event: asyncio.Event, day) -> None:
         """Run day reconciliation alongside polling, never blocking it.
