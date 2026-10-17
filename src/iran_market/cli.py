@@ -199,6 +199,34 @@ async def cmd_health(args, c) -> int:
     return 0
 
 
+async def cmd_fetch_client_types(args, c) -> int:
+    """One TSETMC call per instrument: individual/legal buy/sell split."""
+    import asyncio
+    from .storage.sqlite import upsert_client_types
+    from .timeutil import now_tehran
+
+    instruments = [i for i in c.instruments_repo.list_active() if i.ins_code]
+    if args.limit:
+        instruments = instruments[: args.limit]
+    sem = asyncio.Semaphore(c.settings.http_concurrency)
+    day = now_tehran().date().isoformat()
+    ok = fail = 0
+
+    async def fetch(inst):
+        nonlocal ok, fail
+        async with sem:
+            try:
+                breakdown = await c.tsetmc.get_client_types(inst.ins_code)
+                upsert_client_types(c.store, breakdown, day)
+                ok += 1
+            except Exception as exc:
+                fail += 1
+                print(f"{inst.symbol or inst.ins_code}: {type(exc).__name__}: {exc}")
+
+    await asyncio.gather(*(fetch(inst) for inst in instruments))
+    print(f"client types: {ok} stored, {fail} failed (day={day})")
+    return 0 if fail == 0 else 1
+
 async def cmd_prune(args, c) -> int:
     from .storage.sqlite import prune_before
     days = args.days if args.days is not None else c.settings.retention_days
@@ -397,6 +425,11 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(func=cmd_signals)
 
     sub.add_parser("health").set_defaults(func=cmd_health)
+
+    p = sub.add_parser("fetch-client-types",
+                        help="store individual/legal buy/sell split for active instruments")
+    p.add_argument("--limit", type=int, default=0, help="first N instruments only (0 = all)")
+    p.set_defaults(func=cmd_fetch_client_types)
 
     p = sub.add_parser("prune", help="delete rows older than RETENTION_DAYS, then VACUUM")
     p.add_argument("--days", type=int, default=None,

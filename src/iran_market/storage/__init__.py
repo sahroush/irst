@@ -26,4 +26,6 @@ __all__ = [
     "SqliteLiveStateRepository", "SqliteSignalRepository",
     "open_sqlite_store", "create_schema",
     "prune_before",
+    "upsert_client_types",
+    "latest_client_types",
 ]

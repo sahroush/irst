@@ -62,10 +62,17 @@
       <aside class="side-stack">
         <section class="panel signals-panel" aria-labelledby="signals-title">
           <div class="panel-heading"><div><p class="eyebrow">Recent activity</p><h2 id="signals-title">Supertrend flips</h2></div></div>
+          <div class="tab-bar" role="tablist" aria-label="Screen type">
+            <button class="tab active" data-tab="supertrend" type="button" role="tab" aria-selected="true">Supertrend</button>
+            <button class="tab" data-tab="price_ema6" type="button" role="tab" aria-selected="false">Price > EMA6</button>
+            <button class="tab" data-tab="ema6_ema11" type="button" role="tab" aria-selected="false">EMA6 > EMA11</button>
+            <button class="tab" data-tab="ema11_ema21" type="button" role="tab" aria-selected="false">EMA11 > EMA21</button>
+            <button class="tab" data-tab="buyer_power" type="button" role="tab" aria-selected="false">Buyer power</button>
+          </div>
           <div class="table-scroll">
             <table>
-              <thead><tr><th scope="col">Symbol</th><th scope="col">Direction</th><th scope="col">Time</th></tr></thead>
-              <tbody id="signal-rows"><tr><td colspan="3" class="empty">Loading signals…</td></tr></tbody>
+              <thead id="signals-head"><tr><th scope="col">Symbol</th><th scope="col">Direction</th><th scope="col">Value</th><th scope="col">Time</th></tr></thead>
+              <tbody id="signal-rows"><tr><td colspan="4" class="empty">Loading signals…</td></tr></tbody>
             </table>
           </div>
         </section>

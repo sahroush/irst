@@ -438,3 +438,37 @@ def test_closed_market_health_checks_last_session_snapshot(tmp_path, monkeypatch
         timestamp=datetime(2026, 9, 28, 12, 59, 30, tzinfo=TEHRAN),
     ))
     assert HealthService(c).report()["status"] == "HEALTHY"
+
+def test_screen_endpoint_kinds_and_tabs(tmp_path):
+    from iran_market.models import ClientTypeBreakdown
+    from iran_market.storage.sqlite import upsert_client_types
+
+    c = build(Settings.for_tests(database_url=f"sqlite:///{tmp_path/'db.sqlite'}"))
+    instrument = c.instruments_repo.upsert(Instrument(symbol="A", isin="IRO1TEST0001", ins_code="123"))
+    # 30 daily-bar-worth of 30m bars over several sessions so EMAs are defined.
+    start = datetime(2026, 9, 26, 9, 0, tzinfo=TEHRAN)
+    for i in range(60):
+        s = start + timedelta(minutes=30 * i)
+        c.candles_repo.upsert(Candle(
+            instrument_id=instrument.id, timeframe="30m", start_time=s,
+            end_time=s.replace(minute=30), open=100 + i, high=110 + i,
+            low=90 + i, close=105 + i, volume=1000, trade_count=5,
+            status=CandleStatus.CLOSED,
+        ))
+    client = TestClient(create_app(c))
+    for kind in ("price_ema6", "ema6_ema11", "ema11_ema21"):
+        rows = client.get(f"/api/screen?kind={kind}").json()
+        assert rows == []  # closes rising, but liquidity gate needs settled value
+    assert client.get("/api/screen?kind=nope").status_code == 422
+    # buyer_power: individual buy power 2x sell power -> passes the 1.5 gate.
+    upsert_client_types(c.store, ClientTypeBreakdown(
+        ins_code="123", buy_i_count=10, buy_i_volume=1000,
+        sell_i_count=10, sell_i_volume=500, source="tsetmc",
+    ), day="2026-09-28")
+    rows = client.get("/api/screen?kind=buyer_power").json()
+    assert len(rows) == 1 and rows[0]["symbol"] == "A"
+    assert rows[0]["buy_power"] == 100 and rows[0]["sell_power"] == 50
+    # Page carries the tab bar with all four new tabs.
+    page = client.get("/").text
+    for tab in ("price_ema6", "ema6_ema11", "ema11_ema21", "buyer_power"):
+        assert f'data-tab="{tab}"' in page

@@ -2,11 +2,19 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
-  const state = { timeframe: '', chart: null, rsiChart: null, instrumentId: null, poll: null, requestId: 0, chartPoints: [], rsiValues: [], rsiVisible: false, syncingRange: false, seeded: false };
+  const state = { timeframe: '', tab: 'supertrend', chart: null, rsiChart: null, instrumentId: null, poll: null, requestId: 0, chartPoints: [], rsiValues: [], rsiVisible: false, syncingRange: false, seeded: false };
+  const TABS = {
+    supertrend: { title: 'Supertrend flips' },
+    price_ema6: { title: 'Daily close > EMA6', value: (row) => `${num(row.close)} / ${num(row.ema6)}` },
+    ema6_ema11: { title: 'EMA6 > EMA11 (daily)', value: (row) => `${num(row.ema6)} / ${num(row.ema11)}` },
+    ema11_ema21: { title: 'EMA11 > EMA21 (daily)', value: (row) => `${num(row.ema11)} / ${num(row.ema21)}` },
+    buyer_power: { title: 'قدرت خریدار حقیقی > ۱.۵ فروشنده', value: (row) => `${num(row.buy_power)} / ${num(row.sell_power)}` },
+  };
   const els = {
     active: $('active'), building: $('building'), signalsCount: $('signals-count'), snapshot: $('snapshot'),
     health: $('health-badge'), search: $('search'), refresh: $('refresh'),
-    signalRows: $('signal-rows'), error: $('page-error'),
+    signalRows: $('signal-rows'), signalsHead: $('signals-head'), signalsTitle: $('signals-title'),
+    error: $('page-error'),
     status: $('page-status'), updated: $('updated-at'), detail: $('detail'), detailTitle: $('detail-title'),
     timeframe: $('timeframe'), closeDetail: $('close-detail'), chart: $('market-chart'),
     chartSummary: $('chart-summary'), chartEmpty: $('chart-empty'), marketState: $('market-state'), candleAge: $('candle-age'), rsiToggle: $('rsi-toggle'), rsiLegend: $('rsi-legend'), rsiPanel: $('rsi-panel'), rsiChart: $('rsi-chart'),
@@ -41,6 +49,8 @@
   }
   function renderSignals(rows) {
     const signals = Array.isArray(rows) ? rows : [];
+    const tab = TABS[state.tab] || TABS.supertrend;
+    const supertrend = state.tab === 'supertrend';
     els.signalRows.innerHTML = signals.map((signal) => {
       const up = signal.direction === 'bullish';
       const label = signal.symbol || signal.instrument_id || '—';
@@ -49,19 +59,28 @@
       const provisional = signal.provisional === true;
       const classes = [signal.instrument_id ? 'instrument-row' : '', provisional ? 'provisional' : '', provisional && signal.confirmed !== true ? 'unconfirmed' : ''].filter(Boolean).join(' ');
       const badge = provisional ? `<span class="signal-badge${signal.confirmed === true ? '' : ' signal-badge-weak'}" title="Flip inside the still-open ${esc(signal.timeframe || '')} bar; the close can still reverse it">${signal.confirmed === true ? 'PROV' : 'UNCONF'}</span>` : '';
+      const directionCell = supertrend
+        ? `<td class="${up ? 'direction-up' : 'direction-down'}">${up ? '▲' : '▼'} ${esc(signal.direction === 'bullish' ? 'bull' : 'bear')}</td>`
+        : `<td class="direction-up">✓</td>`;
+      const valueCell = supertrend ? '<td>—</td>' : `<td>${tab.value ? esc(tab.value(signal)) : '—'}</td>`;
       return `<tr class="${classes}">
-        <td>${signal.instrument_id ? `<button class="instrument-select" type="button" data-instrument-id="${esc(signal.instrument_id)}" aria-label="Open chart for ${esc(label)}">${esc(label)}</button>` : esc(label)}${badge}</td><td class="${up ? 'direction-up' : 'direction-down'}">${up ? '▲' : '▼'} ${esc(signal.direction === 'bullish' ? 'bull' : 'bear')}</td><td>${esc(ago(signal.candle_time))}</td>
+        <td>${signal.instrument_id ? `<button class="instrument-select" type="button" data-instrument-id="${esc(signal.instrument_id)}" aria-label="Open chart for ${esc(label)}">${esc(label)}</button>` : esc(label)}${badge}</td>${directionCell}${valueCell}<td>${esc(ago(signal.candle_time))}</td>
       </tr>`;
-    }).join('') || '<tr><td colspan="3" class="empty">No signals yet.</td></tr>';
+    }).join('') || `<tr><td colspan="4" class="empty">${supertrend ? 'No signals yet.' : 'No instruments match this screen.'}</td></tr>`;
   }
   async function loadDashboard() {
     if (!state.timeframe) return;
     try {
       setError();
       const timeframe = encodeURIComponent(state.timeframe);
+      const tab = TABS[state.tab] || TABS.supertrend;
+      els.signalsTitle.textContent = tab.title;
+      const rowsUrl = state.tab === 'supertrend'
+        ? `/api/signals?limit=30&timeframe=${timeframe}`
+        : `/api/screen?kind=${encodeURIComponent(state.tab)}&limit=100`;
       const [health, signals] = await Promise.all([
         get('/api/health'),
-        get(`/api/signals?limit=30&timeframe=${timeframe}`),
+        get(rowsUrl),
       ]);
       els.active.textContent = num(health.active_instruments);
       els.building.textContent = num(health.building_candles);
@@ -289,6 +308,15 @@
     const button = event.target.closest('.instrument-select');
     if (button) openInstrument(button.dataset.instrumentId);
   });
+  document.querySelectorAll('.tab').forEach((tab) => tab.addEventListener('click', () => {
+    state.tab = tab.dataset.tab;
+    document.querySelectorAll('.tab').forEach((item) => {
+      const active = item === tab;
+      item.classList.toggle('active', active);
+      item.setAttribute('aria-selected', String(active));
+    });
+    loadDashboard();
+  }));
   els.search.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); openSearchMatch(); }
   });

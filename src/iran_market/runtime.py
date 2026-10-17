@@ -163,7 +163,9 @@ class MarketRuntime:
                 await self._wait(stop_event, max(interval, 30.0))
 
     def _maybe_prune(self, day) -> None:
-        """Once per day: delete rows older than retention_days, then VACUUM.
+        """Once per day: delete trades/fetch_runs older than retention_days, then VACUUM.
+
+        Candles and signals are never pruned (see storage.sqlite.prune_before).
 
         Runs inline (market is closed, no polling pressure) but is skipped when
         retention_days=0. VACUUM can take minutes on a large trades table; the

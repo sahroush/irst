@@ -155,6 +155,14 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 CREATE INDEX IF NOT EXISTS ix_signals_instrument ON signals(instrument_id, timeframe, candle_time);
 CREATE INDEX IF NOT EXISTS ix_signals_scanner ON signals(scanner_name, candle_time);
+
+CREATE TABLE IF NOT EXISTS client_types (
+    ins_code TEXT PRIMARY KEY,
+    day TEXT NOT NULL,
+    buy_i_count INTEGER, buy_i_volume INTEGER, sell_i_count INTEGER, sell_i_volume INTEGER,
+    buy_l_count INTEGER, buy_l_volume INTEGER, sell_l_count INTEGER, sell_l_volume INTEGER,
+    fetched_at TEXT NOT NULL
+);
 """
 
 
@@ -582,11 +590,52 @@ def open_sqlite_store(database_url: str) -> SqliteStore:
     return SqliteStore(database_url)
 
 
-def prune_before(store: SqliteStore, days: int, *, now: datetime | None = None) -> dict:
-    """Delete candles/trades/signals/fetch_runs older than `days`, then VACUUM.
+def upsert_client_types(store: SqliteStore, breakdown, day: str) -> None:
+    """One row per instrument, overwritten daily: the screen needs only the latest."""
+    from ..timeutil import now_tehran
+    conn = store.connect()
+    with conn:
+        conn.execute(
+            """INSERT INTO client_types
+                 (ins_code, day, buy_i_count, buy_i_volume, sell_i_count, sell_i_volume,
+                  buy_l_count, buy_l_volume, sell_l_count, sell_l_volume, fetched_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?)
+               ON CONFLICT(ins_code) DO UPDATE SET
+                 day=excluded.day, buy_i_count=excluded.buy_i_count,
+                 buy_i_volume=excluded.buy_i_volume, sell_i_count=excluded.sell_i_count,
+                 sell_i_volume=excluded.sell_i_volume, buy_l_count=excluded.buy_l_count,
+                 buy_l_volume=excluded.buy_l_volume, sell_l_count=excluded.sell_l_count,
+                 sell_l_volume=excluded.sell_l_volume, fetched_at=excluded.fetched_at""",
+            (breakdown.ins_code, day,
+             breakdown.buy_i_count, breakdown.buy_i_volume,
+             breakdown.sell_i_count, breakdown.sell_i_volume,
+             breakdown.buy_l_count, breakdown.buy_l_volume,
+             breakdown.sell_l_count, breakdown.sell_l_volume,
+             now_tehran().isoformat()),
+        )
 
-    days <= 0 disables. All timestamps are Tehran-local ISO strings; comparisons
-    are lexicographic and safe because every writer uses the same +03:30 offset.
+
+def latest_client_types(store: SqliteStore) -> list[dict]:
+    """All rows of the most recent stored day, joined to instruments."""
+    conn = store.connect()
+    day = conn.execute("SELECT MAX(day) FROM client_types").fetchone()[0]
+    if not day:
+        return []
+    return [dict(row) for row in conn.execute(
+        """SELECT ct.*, i.id as instrument_id, i.symbol FROM client_types ct
+           LEFT JOIN instruments i ON i.ins_code = ct.ins_code
+           WHERE ct.day = ?""", (day,),
+    ).fetchall()]
+
+
+def prune_before(store: SqliteStore, days: int, *, now: datetime | None = None) -> dict:
+    """Delete trades/fetch_runs older than `days`, then VACUUM.
+
+    Candles and signals are kept forever: an OHLCV row is a few numbers while
+    the trades it came from dominate DB size, and the EMA screens and
+    indicators need long daily history. days <= 0 disables. All timestamps are
+    Tehran-local ISO strings; comparisons are lexicographic and safe because
+    every writer uses the same +03:30 offset.
     """
     if days is None or days <= 0:
         return {}
@@ -595,14 +644,8 @@ def prune_before(store: SqliteStore, days: int, *, now: datetime | None = None) 
     conn = store.connect()
     report = {}
     with conn:
-        report["candles"] = conn.execute(
-            "DELETE FROM candles WHERE start_time < ?", (cutoff.isoformat(),)
-        ).rowcount
         report["trades"] = conn.execute(
             "DELETE FROM trades WHERE trade_date < ?", (cutoff.date().isoformat(),)
-        ).rowcount
-        report["signals"] = conn.execute(
-            "DELETE FROM signals WHERE candle_time < ?", (cutoff.isoformat(),)
         ).rowcount
         report["fetch_runs"] = conn.execute(
             "DELETE FROM fetch_runs WHERE started_at < ?",

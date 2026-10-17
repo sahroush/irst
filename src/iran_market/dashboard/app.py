@@ -13,10 +13,12 @@ from fastapi.staticfiles import StaticFiles
 from ..bootstrap import build
 from ..candles.models import Timeframe
 from ..indicators.base import provisional_candles
+from ..indicators.ema import ema_series
 from ..indicators.supertrend import SupertrendIndicator
 from ..indicators.rsi import rsi_confirms, rsi_series
 from ..models import Candle, CandleStatus
 from ..monitoring.health import HealthService
+from ..storage.sqlite import latest_client_types
 
 STATIC_DIR = Path(__file__).with_name("static")
 
@@ -163,6 +165,64 @@ def _tradeable(c, gate: dict[str, tuple[float, int]], instrument_id) -> bool:
     value, closes = gate.get(str(instrument_id), (0.0, 0))
     return (value >= c.settings.min_traded_value
             and closes >= c.settings.min_price_discovery)
+
+
+EMA_SCREENS = {
+    "price_ema6": lambda close, e6, e11, e21: close > e6 if (close and e6) else False,
+    "ema6_ema11": lambda close, e6, e11, e21: e6 > e11 if (e6 and e11) else False,
+    "ema11_ema21": lambda close, e6, e11, e21: e11 > e21 if (e11 and e21) else False,
+}
+BUYER_POWER_RATIO = 1.5
+
+
+def _ema_screen(c, kind: str, stored: set[str]) -> list[dict]:
+    """Instruments where the daily EMA condition holds on the latest bar.
+
+    The in-progress day participates via provisional_candles, so a screen can
+    fire intraday; the close can still reverse it before session end.
+    """
+    holds = EMA_SCREENS[kind]
+    gate = _liquidity(c)
+    rows = []
+    for instrument in c.instruments_repo.list_active():
+        if not _tradeable(c, gate, instrument.id):
+            continue
+        candles = _chart_series(c, instrument.id, "1d", 120, stored)
+        usable = provisional_candles(candles)
+        if not usable:
+            continue
+        closes = [float(bar.close) for bar in usable]
+        e6 = ema_series(closes, 6)[-1]
+        e11 = ema_series(closes, 11)[-1]
+        e21 = ema_series(closes, 21)[-1]
+        close = closes[-1]
+        if not holds(close, e6, e11, e21):
+            continue
+        # The ratio shows how far above the reference the condition holds.
+        reference = close if kind == "price_ema6" else e6 if kind == "ema6_ema11" else e11
+        rows.append({
+            "instrument_id": str(instrument.id), "symbol": instrument.symbol,
+            "close": close, "ema6": e6, "ema11": e11, "ema21": e21,
+            "value": close / reference if reference else None,
+            "candle_time": usable[-1].start_time.isoformat(),
+        })
+    return sorted(rows, key=lambda row: (row["value"] or 0), reverse=True)
+
+
+def _buyer_power_screen(c) -> list[dict]:
+    """قدرت خریدار حقیقی > 1.5 × قدرت فروشنده حقیقی on the latest stored day."""
+    rows = []
+    for row in latest_client_types(c.store):
+        bp = row["buy_i_volume"] / row["buy_i_count"] if row["buy_i_count"] else None
+        sp = row["sell_i_volume"] / row["sell_i_count"] if row["sell_i_count"] else None
+        if bp is None or sp is None or bp <= BUYER_POWER_RATIO * sp:
+            continue
+        rows.append({
+            "instrument_id": row.get("instrument_id"), "symbol": row.get("symbol"),
+            "buy_power": bp, "sell_power": sp,
+            "value": bp / sp if sp else None, "candle_time": row["day"],
+        })
+    return sorted(rows, key=lambda row: (row["value"] or 0), reverse=True)
 
 
 def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrument_id=None) -> list[dict]:
@@ -332,6 +392,15 @@ def create_app(container=None) -> FastAPI:
         if tf not in _timeframes(stored, c.settings.scanner_timeframe):
             raise HTTPException(422, "unsupported timeframe")
         return _timeframe_signals(c, tf, stored, limit)
+
+    @app.get("/api/screen")
+    def screen(kind: str, limit: int = Query(100, ge=1, le=500)):
+        stored = _stored_timeframes(c)
+        if kind in EMA_SCREENS:
+            return _ema_screen(c, kind, stored)[:limit]
+        if kind == "buyer_power":
+            return _buyer_power_screen(c)[:limit]
+        raise HTTPException(422, f"unknown screen kind: {kind}")
 
     @app.get("/api/instruments/{instrument_id}")
     def instrument_detail(instrument_id: str, timeframe: str | None = None, limit: int = Query(120, ge=10, le=1000)):

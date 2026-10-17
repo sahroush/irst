@@ -97,6 +97,34 @@ class Candle(BaseModel):
     reconciled_at: datetime | None = None
 
 
+class ClientTypeBreakdown(BaseModel):
+    """Per-instrument individual/legal (حقیقی/حقوقی) buy/sell split for one day."""
+
+    ins_code: str
+    buy_i_count: int | None = None
+    buy_i_volume: int | None = None
+    sell_i_count: int | None = None
+    sell_i_volume: int | None = None
+    buy_l_count: int | None = None
+    buy_l_volume: int | None = None
+    sell_l_count: int | None = None
+    sell_l_volume: int | None = None
+    source: str = ""
+
+    @property
+    def buy_power(self) -> float | None:
+        """Average individual buy volume (قدرت خریدار حقیقی)."""
+        if not self.buy_i_count or not self.buy_i_volume:
+            return None
+        return self.buy_i_volume / self.buy_i_count
+
+    @property
+    def sell_power(self) -> float | None:
+        """Average individual sell volume (قدرت فروشنده حقیقی)."""
+        if not self.sell_i_count or not self.sell_i_volume:
+            return None
+        return self.sell_i_volume / self.sell_i_count
+
 class MarketSnapshot(BaseModel):
     """Bulk market state for one instrument at one moment (from market-watch)."""
 

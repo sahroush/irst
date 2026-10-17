@@ -17,7 +17,7 @@ from datetime import date, datetime
 from ..errors import ProviderParseError
 from ..http import HttpClient
 from ..logging_setup import get_logger
-from ..models import Trade
+from ..models import ClientTypeBreakdown, Trade
 from ..timeutil import TEHRAN, heven_to_time, to_gregorian_compact
 from .base import MarketDataProvider
 
@@ -36,7 +36,7 @@ class TsetmcProvider(MarketDataProvider):
         self._base = base_url.rstrip("/")
 
     def capabilities(self) -> frozenset[str]:
-        return frozenset({"trades"})
+        return frozenset({"trades", "client_types"})
 
     async def get_trades(self, ins_code: str, day: date) -> list[Trade]:
         """Fetch + normalize one instrument-day of trades, ascending order.
@@ -49,7 +49,64 @@ class TsetmcProvider(MarketDataProvider):
         raw = self._extract_history(payload, url)
         return self._normalize(ins_code, day, raw)
 
+    async def get_client_types(self, ins_code: str) -> ClientTypeBreakdown:
+        """Fetch the individual/legal (حقیقی/حقوقی) buy/sell breakdown.
+
+        GetInsClientTypes returns one row of cumulative day counters. Field
+        names were verified 2026-10 on one instrument; unknown keys are logged
+        once via _log_schema_drift-style tolerance (parse accepts either
+        buy_Individual_Count or buyIndividualCount casing).
+        """
+        url = f"{self._base}/api/Parcode/GetInsClientTypes/{ins_code}"
+        payload = await self._http.request_json(url)
+        rows = self._extract_rows(payload, url)
+        if not rows:
+            raise ProviderParseError(f"tsetmc: empty client-types payload: {url}")
+        return self._normalize_client_types(ins_code, rows[0])
+
     # ------------------------------------------------------------- parsing
+
+    @staticmethod
+    def _extract_rows(payload: dict | list, url: str) -> list[dict]:
+        """Return the list of row dicts from a {'data': ...} or bare-list payload."""
+        if isinstance(payload, list):
+            return payload
+        if isinstance(payload, dict):
+            for key in ("data", "clientTypes", "items"):
+                rows = payload.get(key)
+                if isinstance(rows, list):
+                    return rows
+        raise ProviderParseError(f"tsetmc: unexpected payload type {type(payload).__name__}: {url}")
+
+    @staticmethod
+    def _normalize_client_types(ins_code: str, row: dict) -> ClientTypeBreakdown:
+        def pick(*names: str) -> int | None:
+            for name in names:
+                value = row.get(name)
+                if value is not None:
+                    try:
+                        return int(value)
+                    except (TypeError, ValueError):
+                        continue
+            return None
+
+        breakdown = ClientTypeBreakdown(
+            ins_code=ins_code,
+            buy_i_count=pick("buy_Individual_Count", "buyIndividualCount"),
+            buy_i_volume=pick("buy_Individual_Volume", "buyIndividualVolume"),
+            sell_i_count=pick("sell_Individual_Count", "sellIndividualCount"),
+            sell_i_volume=pick("sell_Individual_Volume", "sellIndividualVolume"),
+            buy_l_count=pick("buy_Legal_Count", "buyLegalCount"),
+            buy_l_volume=pick("buy_Legal_Volume", "buyLegalVolume"),
+            sell_l_count=pick("sell_Legal_Count", "sellLegalCount"),
+            sell_l_volume=pick("sell_Legal_Volume", "sellLegalVolume"),
+            source=PROVIDER_NAME,
+        )
+        if breakdown.buy_i_volume is None and breakdown.sell_i_volume is None:
+            raise ProviderParseError(
+                f"tsetmc: client-types row without individual fields: {sorted(row)}"
+            )
+        return breakdown
 
     @staticmethod
     def _extract_history(payload: dict | list, url: str) -> list[dict]:

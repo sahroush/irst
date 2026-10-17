@@ -23,9 +23,10 @@ DEFAULTS = {
     "MIN_TRADED_VALUE": "30000000000",
     "MIN_PRICE_DISCOVERY": "3",
     "TEHRAN_TIMEZONE": "Asia/Tehran",
-    # Retention: delete candles/trades/signals/fetch_runs older than N days
-    # (Tehran time), then VACUUM. 0 disables. trades dominate DB size (~1.5M
-    # rows/session); 30d ≈ 9-10 GB steady state on the current universe.
+    # Retention: delete trades/fetch_runs older than N days (Tehran time),
+    # then VACUUM. 0 disables. trades dominate DB size (~1.5M rows/session);
+    # 30d ≈ 9-10 GB steady state on the current universe. Candles and signals
+    # are kept forever (tiny rows, long daily history needed by the screens).
     "RETENTION_DAYS": "30",
     "RAW_ARCHIVE_ENABLED": "0",
     "RAW_ARCHIVE_DIR": "data/raw",

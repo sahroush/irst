@@ -76,6 +76,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .chart { width: 100%; height: 450px; }
 .chart-controls { display: flex; justify-content: flex-end; gap: 5px; margin-top: 8px; }
 .range-button { border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; }
+.tab-bar { display: flex; flex-wrap: wrap; gap: 6px; margin: -6px 0 12px; }
+.tab { border: 1px solid var(--line); border-radius: 7px; padding: 4px 9px; background: transparent; color: var(--muted); cursor: pointer; font-size: 11px; white-space: nowrap; }
+.tab:hover, .tab.active { color: var(--text); background: var(--surface-raised); border-color: color-mix(in srgb, var(--blue) 45%, var(--line)); }
 .range-button:hover, .range-button.active { color: var(--text); background: var(--surface-raised); }
 .rsi-toggle { min-height: 30px; }
 .rsi-toggle[aria-pressed="true"] { border-color: color-mix(in srgb, var(--blue) 55%, var(--line)); color: var(--blue); background: color-mix(in srgb, var(--blue) 10%, var(--surface)); }

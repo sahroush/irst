@@ -70,10 +70,11 @@ def test_prune_deletes_old_rows_keeps_recent(tmp_path):
     fr.finish(fr.start("tsetmc", "get_trades", "X", recent.date()), status="OK", duration_ms=1)
 
     report = prune_before(store, days=90)
-    assert report == {"candles": 1, "trades": 1, "signals": 1, "fetch_runs": 1}
-    assert len(candles.get_series(INS_ID, "30m")) == 1
+    # Candles and signals are retained forever; only trades/fetch_runs prune.
+    assert report == {"trades": 1, "fetch_runs": 1}
+    assert len(candles.get_series(INS_ID, "30m")) == 2
     assert len(trades.get_trades(INS_ID, recent.date())) == 1
     assert trades.get_trades(INS_ID, OLD.date()) == []
-    assert len(signals.list_recent(recent - timedelta(minutes=1))) == 1
+    assert len(signals.list_recent(recent - timedelta(days=365))) == 2
     n = store.connect().execute("SELECT COUNT(*) AS n FROM fetch_runs").fetchone()["n"]
     assert n == 1
