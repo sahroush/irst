@@ -26,6 +26,11 @@
     return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
   };
   const ago = (value) => {
+    // buyer_power rows carry a bare YYYY-MM-DD day, not a timestamp: show it
+    // as a date instead of misparsing UTC midnight into 03:30 local.
+    if (typeof value === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      return new Date(`${value}T00:00:00`).toLocaleDateString('en-GB', { timeZone: 'Asia/Tehran', day: '2-digit', month: 'short', year: 'numeric' });
+    }
     const ms = Date.parse(value);
     if (!Number.isFinite(ms)) return '—';
     const seconds = Math.max(0, Math.floor((Date.now() - ms) / 1000));
@@ -68,8 +73,9 @@
       </tr>`;
     }).join('') || `<tr><td colspan="4" class="empty">${supertrend ? 'No signals yet.' : 'No instruments match this screen.'}</td></tr>`;
   }
-  async function loadDashboard() {
+  async function loadDashboard({ chart = true } = {}) {
     if (!state.timeframe) return;
+    const request = ++state.requestId;
     try {
       setError();
       const timeframe = encodeURIComponent(state.timeframe);
@@ -82,6 +88,7 @@
         get('/api/health'),
         get(rowsUrl),
       ]);
+      if (request !== state.requestId) return;  // a newer tab/poll won
       els.active.textContent = num(health.active_instruments);
       els.building.textContent = num(health.building_candles);
       els.signalsCount.textContent = num(health.signals);
@@ -89,11 +96,15 @@
       els.marketState.textContent = health.market_state || '—';
       updateHealth(health.status);
       renderSignals(signals);
-      if (state.instrumentId) await openInstrument(state.instrumentId);
-      else if (!state.seeded) { state.seeded = true; await openSearchMatch(); }
+      // The chart tracks the instrument, not the tab: only refetch it on
+      // poll/timeframe changes, never on tab switches.
+      if (state.instrumentId) {
+        if (chart) await openInstrument(state.instrumentId);
+      } else if (!state.seeded) { state.seeded = true; await openSearchMatch(); }
       els.updated.textContent = `Updated ${new Date().toLocaleTimeString()}`;
       els.status.textContent = 'Dashboard updated';
     } catch (error) {
+      if (request !== state.requestId) return;
       setError(`Dashboard data unavailable: ${error.message}`);
       els.status.textContent = 'Dashboard update failed';
     }
@@ -244,6 +255,7 @@
       const inst = data.instrument || {};
       els.detailTitle.textContent = `${inst.symbol || inst.isin || id} · ${tf || 'default timeframe'}`;
       const points = normalizedCandles(data.candles);
+      const markers = normalizeMarkers(data.markers);
       if (!points.length) {
         els.chartSummary.textContent = 'No candle data';
         els.chartEmpty.hidden = false;
@@ -257,15 +269,26 @@
       const chart = createChart();
       if (!chart) throw new Error('Lightweight Charts failed to load');
       const { candles, volume, bullTrend, bearTrend } = chart.__series;
+      // Skip the repaint (and visible-range reset) when the data is
+      // unchanged: poll-triggered refetches then cost one cheap API call.
+      const unchanged = JSON.stringify(points) === JSON.stringify(state.chartPoints)
+        && JSON.stringify(data.supertrend_series || []) === JSON.stringify(state.lastTrend)
+        && JSON.stringify(markers) === JSON.stringify(state.lastMarkers);
       state.chartPoints = points;
       state.rsiValues = data.rsi_series || [];
+      state.lastTrend = data.supertrend_series || [];
+      state.lastMarkers = markers;
+      if (unchanged) {
+        els.chartSummary.textContent = `${points.length} ${tf || 'timeframe'} candles · last close ${num(points[points.length - 1].close)} · ${points[points.length - 1].status || 'unknown'} · Supertrend ${(data.supertrend || {}).state || '—'}${(data.supertrend || {}).value == null ? '' : ` at ${num(data.supertrend.value)}`}`;
+        els.candleAge.textContent = `Candle: ${ago(data.candles[data.candles.length - 1].start_time)}`;
+        return;
+      }
       candles.setData(points.map(({ time, open, high, low, close }) => ({ time, open, high, low, close })));
       volume.setData(points.map((item) => ({ time: item.time, value: item.volume, color: item.close >= item.open ? 'rgba(57,201,146,.42)' : 'rgba(240,120,123,.42)' })));
       const trendPoints = supertrendPoints(data.supertrend_series, points);
       bullTrend.setData(trendPoints.map((point) => point.bullish ? { time: point.time, value: point.value } : { time: point.time }));
       bearTrend.setData(trendPoints.map((point) => point.bullish ? { time: point.time } : { time: point.time, value: point.value }));
       if (state.rsiChart) setRSIData(state.rsiValues);
-      const markers = normalizeMarkers(data.markers);
       candles.setMarkers(markers.filter((marker) => points.some((point) => point.time === marker.time)));
       chart.timeScale().fitContent();
       if (state.rsiChart) {
@@ -315,7 +338,7 @@
       item.classList.toggle('active', active);
       item.setAttribute('aria-selected', String(active));
     });
-    loadDashboard();
+    loadDashboard({ chart: false });
   }));
   els.search.addEventListener('keydown', (event) => {
     if (event.key === 'Enter') { event.preventDefault(); openSearchMatch(); }

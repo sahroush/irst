@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import threading
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -199,6 +201,52 @@ EMA_SCREENS = {
 }
 BUYER_POWER_RATIO = 1.5
 
+# The three EMA tabs share one per-instrument daily snapshot (series + EMAs):
+# ~1s of work for the whole market, so serve it from a short-TTL cache and
+# let each tab just filter it. TTL < the 30s poll, so in-progress bars stay
+# honest; the cache is per-process (fine for the single serve instance).
+# The lock prevents a rebuild stampede: without it, N concurrent requests on
+# an expired TTL each rebuild (~1s of SQLite-heavy work apiece, serialized
+# by the DB -> N-second waits).
+_EMA_CACHE_TTL = 10.0
+_ema_cache: dict[str, tuple[float, dict]] = {"snapshot": (0.0, {})}
+_ema_cache_lock = threading.Lock()
+
+
+def _ema_snapshot(c, stored: set[str]) -> dict[str, dict]:
+    """Per-instrument {close, ema6, ema11, ema21, candle_time} for the market.
+
+    Shared by the three EMA tabs and cached briefly: building it walks every
+    tradeable instrument's daily series (~1s), while each tab only filters.
+    """
+    stamp, snapshot = _ema_cache["snapshot"]
+    if snapshot and time.monotonic() - stamp < _EMA_CACHE_TTL:
+        return snapshot
+    with _ema_cache_lock:
+        stamp, snapshot = _ema_cache["snapshot"]
+        if snapshot and time.monotonic() - stamp < _EMA_CACHE_TTL:
+            return snapshot  # another request already rebuilt it
+        gate = _liquidity(c)
+        snapshot = {}
+        for instrument in c.instruments_repo.list_active():
+            if not _tradeable(c, gate, instrument.id):
+                continue
+            candles = _chart_series(c, instrument.id, "1d", 120, stored)
+            usable = provisional_candles(candles)
+            if not usable:
+                continue
+            closes = [float(bar.close) for bar in usable]
+            snapshot[str(instrument.id)] = {
+                "symbol": instrument.symbol,
+                "close": closes[-1],
+                "ema6": ema_series(closes, 6)[-1],
+                "ema11": ema_series(closes, 11)[-1],
+                "ema21": ema_series(closes, 21)[-1],
+                "candle_time": usable[-1].start_time.isoformat(),
+            }
+        _ema_cache["snapshot"] = (time.monotonic(), snapshot)
+        return snapshot
+
 
 def _ema_screen(c, kind: str, stored: set[str]) -> list[dict]:
     """Instruments where the daily EMA condition holds on the latest bar.
@@ -207,30 +255,18 @@ def _ema_screen(c, kind: str, stored: set[str]) -> list[dict]:
     fire intraday; the close can still reverse it before session end.
     """
     holds = EMA_SCREENS[kind]
-    gate = _liquidity(c)
+    pair = {"price_ema6": ("close", "ema6"), "ema6_ema11": ("ema6", "ema11"), "ema11_ema21": ("ema11", "ema21")}[kind]
     rows = []
-    for instrument in c.instruments_repo.list_active():
-        if not _tradeable(c, gate, instrument.id):
+    for instrument_id, s in _ema_snapshot(c, stored).items():
+        values = (s["close"], s["ema6"], s["ema11"], s["ema21"])
+        if not holds(*values):
             continue
-        candles = _chart_series(c, instrument.id, "1d", 120, stored)
-        usable = provisional_candles(candles)
-        if not usable:
-            continue
-        closes = [float(bar.close) for bar in usable]
-        e6 = ema_series(closes, 6)[-1]
-        e11 = ema_series(closes, 11)[-1]
-        e21 = ema_series(closes, 21)[-1]
-        close = closes[-1]
-        if not holds(close, e6, e11, e21):
-            continue
-        # Strength = how far the condition's left side exceeds its right side.
-        pair = {"price_ema6": (close, e6), "ema6_ema11": (e6, e11), "ema11_ema21": (e11, e21)}[kind]
-        left, right = pair
+        left, right = s[pair[0]], s[pair[1]]
         rows.append({
-            "instrument_id": str(instrument.id), "symbol": instrument.symbol,
-            "close": close, "ema6": e6, "ema11": e11, "ema21": e21,
+            "instrument_id": instrument_id, "symbol": s["symbol"],
+            "close": s["close"], "ema6": s["ema6"], "ema11": s["ema11"], "ema21": s["ema21"],
             "value": left / right if right else None,
-            "candle_time": usable[-1].start_time.isoformat(),
+            "candle_time": s["candle_time"],
         })
     return sorted(rows, key=lambda row: (row["value"] or 0), reverse=True)
 
