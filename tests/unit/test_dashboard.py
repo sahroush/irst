@@ -1,4 +1,5 @@
 from fastapi.testclient import TestClient
+import pytest
 from iran_market.bootstrap import build
 from iran_market.config import Settings
 from iran_market.dashboard.app import create_app
@@ -445,20 +446,26 @@ def test_screen_endpoint_kinds_and_tabs(tmp_path):
 
     c = build(Settings.for_tests(database_url=f"sqlite:///{tmp_path/'db.sqlite'}"))
     instrument = c.instruments_repo.upsert(Instrument(symbol="A", isin="IRO1TEST0001", ins_code="123"))
-    # 30 daily-bar-worth of 30m bars over several sessions so EMAs are defined.
-    start = datetime(2026, 9, 26, 9, 0, tzinfo=TEHRAN)
-    for i in range(60):
-        s = start + timedelta(minutes=30 * i)
+    # 25 real 1d bars (stored "1d" rows are read directly by _chart_series);
+    # closes rise monotonically so every EMA condition holds.
+    for i in range(25):
+        s = datetime(2026, 9, 1, tzinfo=TEHRAN) + timedelta(days=i)
         c.candles_repo.upsert(Candle(
-            instrument_id=instrument.id, timeframe="30m", start_time=s,
-            end_time=s.replace(minute=30), open=100 + i, high=110 + i,
+            instrument_id=instrument.id, timeframe="1d", start_time=s,
+            end_time=s + timedelta(hours=4), open=100 + i, high=110 + i,
             low=90 + i, close=105 + i, volume=1000, trade_count=5,
             status=CandleStatus.CLOSED,
         ))
     client = TestClient(create_app(c))
-    for kind in ("price_ema6", "ema6_ema11", "ema11_ema21"):
+    # Closes rise monotonically, so every EMA condition holds. The metric is
+    # the condition's LHS/RHS pair, and it must sort with real spread.
+    for kind, lhs_key, rhs_key in (("price_ema6", "close", "ema6"),
+                                   ("ema6_ema11", "ema6", "ema11"),
+                                   ("ema11_ema21", "ema11", "ema21")):
         rows = client.get(f"/api/screen?kind={kind}").json()
-        assert rows == []  # closes rising, but liquidity gate needs settled value
+        assert len(rows) == 1 and rows[0]["symbol"] == "A"
+        assert rows[0]["value"] == pytest.approx(rows[0][lhs_key] / rows[0][rhs_key])
+        assert rows[0]["value"] > 1.0
     assert client.get("/api/screen?kind=nope").status_code == 422
     # buyer_power: individual buy power 2x sell power -> passes the 1.5 gate.
     upsert_client_types(c.store, ClientTypeBreakdown(
@@ -472,3 +479,35 @@ def test_screen_endpoint_kinds_and_tabs(tmp_path):
     page = client.get("/").text
     for tab in ("price_ema6", "ema6_ema11", "ema11_ema21", "buyer_power"):
         assert f'data-tab="{tab}"' in page
+
+
+def test_chart_series_merges_eod_with_derived_daily(tmp_path):
+    """EOD backfill rows older than 30m coverage merge; overlap goes to 30m."""
+    from datetime import date
+    c = build(Settings.for_tests(database_url=f"sqlite:///{tmp_path/'db.sqlite'}"))
+    instrument = c.instruments_repo.upsert(Instrument(symbol="B", isin="IRO1TESTB001", ins_code="456"))
+    # EOD bar for a day with NO 30m data (2 months before 30m coverage starts)
+    c.candles_repo.upsert(Candle(
+        instrument_id=instrument.id, timeframe="1d",
+        start_time=datetime(2026, 7, 1, 9, tzinfo=TEHRAN), end_time=datetime(2026, 7, 1, 13, tzinfo=TEHRAN),
+        open=100, high=110, low=90, close=105, volume=10, trade_count=2,
+        status=CandleStatus.RECONCILED, source="eod",
+    ))
+    # One session of 30m bars (3 closed bars + nothing else)
+    for i in range(3):
+        s = datetime(2026, 9, 1, 9 + i * 0 if False else 9, 0, tzinfo=TEHRAN) + timedelta(minutes=30 * i)
+        c.candles_repo.upsert(Candle(
+            instrument_id=instrument.id, timeframe="30m", start_time=s,
+            end_time=s + timedelta(minutes=30), open=100 + i, high=110 + i,
+            low=90 + i, close=105 + i, volume=5, trade_count=1,
+            status=CandleStatus.CLOSED,
+        ))
+    from iran_market.dashboard.app import _chart_series, _stored_timeframes
+    stored = _stored_timeframes(c)
+    series = _chart_series(c, instrument.id, "1d", 120, stored)
+    days = [bar.start_time.date().isoformat() for bar in series]
+    assert days == ["2026-07-01", "2026-09-01"]
+    assert series[0].source == "eod" and series[0].status == CandleStatus.RECONCILED
+    assert series[1].source == "derived" and series[1].close == 107  # 105+1+... last 30m close
+    # 1h still derives from 30m only (3 bars = 09:00-10:30 = 2 hour buckets)
+    assert [b.start_time.hour for b in _chart_series(c, instrument.id, "1h", 10, stored)] == [9, 10]

@@ -200,32 +200,71 @@ async def cmd_health(args, c) -> int:
 
 
 async def cmd_fetch_client_types(args, c) -> int:
-    """One TSETMC call per instrument: individual/legal buy/sell split."""
-    import asyncio
+    """One bulk TSETMC call: individual/legal buy/sell split for the market."""
     from .storage.sqlite import upsert_client_types
     from .timeutil import now_tehran
 
-    instruments = [i for i in c.instruments_repo.list_active() if i.ins_code]
-    if args.limit:
-        instruments = instruments[: args.limit]
-    sem = asyncio.Semaphore(c.settings.http_concurrency)
+    try:
+        breakdowns = await c.tsetmc.get_client_types_all()
+    except Exception as exc:
+        print(f"client types fetch failed: {type(exc).__name__}: {exc}")
+        return 1
     day = now_tehran().date().isoformat()
-    ok = fail = 0
+    stored = 0
+    for breakdown in breakdowns:
+        try:
+            upsert_client_types(c.store, breakdown, day)
+            stored += 1
+        except Exception as exc:
+            print(f"{breakdown.ins_code}: {type(exc).__name__}: {exc}")
+    print(f"client types: {stored} stored, {len(breakdowns) - stored} failed (day={day})")
+    return 0 if stored == len(breakdowns) else 1
+
+
+async def cmd_backfill_daily(args, c) -> int:
+    """Backfill official EOD daily bars from TSETMC (tiny rows, no trades).
+
+    Only writes days NOT already covered by stored 30m candles, so the
+    derived-from-30m view (with today's provisional bar and intraday flips)
+    stays authoritative for recent history. Upserts make reruns safe.
+    """
+    import asyncio
+
+    instruments = [i for i in c.instruments_repo.list_active() if i.ins_code]
+    if args.symbols:
+        wanted = {s.upper() for s in args.symbols.split(",")}
+        instruments = [i for i in instruments if (i.symbol or "").upper() in wanted]
+    covered: set[str] = {
+        row["day"] for row in c.store.connect().execute(
+            "SELECT DISTINCT substr(start_time,1,10) AS day FROM candles WHERE timeframe='30m'"
+        ).fetchall()
+    }
+    sem = asyncio.Semaphore(c.settings.http_concurrency)
+    stored = skipped = failed = 0
 
     async def fetch(inst):
-        nonlocal ok, fail
+        nonlocal stored, skipped, failed
         async with sem:
             try:
-                breakdown = await c.tsetmc.get_client_types(inst.ins_code)
-                upsert_client_types(c.store, breakdown, day)
-                ok += 1
+                bars = await c.tsetmc.get_daily_closings(inst.ins_code, inst.id, args.days)
             except Exception as exc:
-                fail += 1
+                failed += 1
                 print(f"{inst.symbol or inst.ins_code}: {type(exc).__name__}: {exc}")
+                return
+            fresh = 0
+            for bar in bars:
+                if bar.start_time.date().isoformat() in covered:
+                    continue
+                c.candles_repo.upsert(bar)
+                fresh += 1
+            if fresh:
+                stored += fresh
+            else:
+                skipped += 1
 
     await asyncio.gather(*(fetch(inst) for inst in instruments))
-    print(f"client types: {ok} stored, {fail} failed (day={day})")
-    return 0 if fail == 0 else 1
+    print(f"backfill-daily: {stored} bars stored, {skipped} instruments already covered, {failed} failed")
+    return 0 if failed == 0 else 1
 
 async def cmd_prune(args, c) -> int:
     from .storage.sqlite import prune_before
@@ -427,9 +466,14 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("health").set_defaults(func=cmd_health)
 
     p = sub.add_parser("fetch-client-types",
-                        help="store individual/legal buy/sell split for active instruments")
-    p.add_argument("--limit", type=int, default=0, help="first N instruments only (0 = all)")
+                       help="store individual/legal buy/sell split for active instruments")
     p.set_defaults(func=cmd_fetch_client_types)
+
+    p = sub.add_parser("backfill-daily",
+                       help="backfill official EOD daily bars (tiny rows; skips days with 30m data)")
+    p.add_argument("--days", type=int, default=130, help="days of history per instrument")
+    p.add_argument("--symbols", default="", help="comma-separated symbol filter (default: all)")
+    p.set_defaults(func=cmd_backfill_daily)
 
     p = sub.add_parser("prune", help="delete rows older than RETENTION_DAYS, then VACUUM")
     p.add_argument("--days", type=int, default=None,

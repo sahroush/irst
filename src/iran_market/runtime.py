@@ -119,6 +119,7 @@ class MarketRuntime:
         self._reconciled_days: set = set()
         self._reconcile_task: asyncio.Future | None = None
         self._pruned_days: set = set()
+        self._client_type_days: set = set()
 
     async def catch_up(self, *, sync_registry: bool = True) -> dict:
         """Startup historical bootstrap: registry sync + resumable prefetch."""
@@ -155,6 +156,7 @@ class MarketRuntime:
                     # Market closed: finalize + reconcile the just-finished session.
                     self._schedule_reconcile(stop_event, now.date())
                     self._maybe_prune(now.date())
+                    await self._maybe_fetch_client_types(now.date())
                     await self._wait(stop_event, max(interval, 30.0))
             except asyncio.CancelledError:
                 raise
@@ -183,6 +185,27 @@ class MarketRuntime:
         except Exception as exc:
             self._pruned_days.discard(day)  # retry next closed-market pass
             log.error("retention prune failed", extra={"error": f"{type(exc).__name__}: {exc}"})
+
+    async def _maybe_fetch_client_types(self, day) -> None:
+        """Once per day after close: bulk-refresh the buyer-power screen feed.
+
+        GetClientTypeAll is a single ~2158-row request (~200 KB), safe inline
+        next to the prune in the market-closed branch. Failures reset the
+        once-per-day marker so the next closed-market pass retries.
+        """
+        if day in self._client_type_days:
+            return
+        self._client_type_days.add(day)
+        try:
+            from .storage.sqlite import upsert_client_types
+
+            breakdowns = await self.c.tsetmc.get_client_types_all()
+            for breakdown in breakdowns:
+                upsert_client_types(self.c.store, breakdown, day.isoformat())
+            log.info("client types refreshed", extra={"stored": len(breakdowns)})
+        except Exception as exc:
+            self._client_type_days.discard(day)  # retry next closed-market pass
+            log.error("client types refresh failed", extra={"error": f"{type(exc).__name__}: {exc}"})
 
     def _schedule_reconcile(self, stop_event: asyncio.Event, day) -> None:
         """Run day reconciliation alongside polling, never blocking it.

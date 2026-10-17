@@ -12,12 +12,12 @@ Verified behavior (2026-09-26):
 from __future__ import annotations
 
 import asyncio
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 from ..errors import ProviderParseError
 from ..http import HttpClient
 from ..logging_setup import get_logger
-from ..models import ClientTypeBreakdown, Trade
+from ..models import Candle, CandleStatus, ClientTypeBreakdown, Trade
 from ..timeutil import TEHRAN, heven_to_time, to_gregorian_compact
 from .base import MarketDataProvider
 
@@ -36,7 +36,7 @@ class TsetmcProvider(MarketDataProvider):
         self._base = base_url.rstrip("/")
 
     def capabilities(self) -> frozenset[str]:
-        return frozenset({"trades", "client_types"})
+        return frozenset({"trades", "client_types", "daily_closings"})
 
     async def get_trades(self, ins_code: str, day: date) -> list[Trade]:
         """Fetch + normalize one instrument-day of trades, ascending order.
@@ -49,20 +49,58 @@ class TsetmcProvider(MarketDataProvider):
         raw = self._extract_history(payload, url)
         return self._normalize(ins_code, day, raw)
 
-    async def get_client_types(self, ins_code: str) -> ClientTypeBreakdown:
-        """Fetch the individual/legal (حقیقی/حقوقی) buy/sell breakdown.
+    async def get_daily_closings(self, ins_code: str, instrument_id, days: int = 130) -> list[Candle]:
+        """End-of-day OHLCV bars for one instrument, oldest-first.
 
-        GetInsClientTypes returns one row of cumulative day counters. Field
-        names were verified 2026-10 on one instrument; unknown keys are logged
-        once via _log_schema_drift-style tolerance (parse accepts either
-        buy_Individual_Count or buyIndividualCount casing).
+        GetClosingPriceDailyList returns the exchange's official daily bars
+        (priceFirst/priceMax/priceMin/pClosing, qTotTran5J volume, zTotTran
+        trade count), newest-first. Verified live 2026-10-17: high/low/volume/
+        trade_count match reconciled 30m aggregates exactly. Bars are stamped
+        at the 09:00 session open because EOD rows carry no time; charts and
+        the EMA screens read them fine, but they must never be used for
+        intraday flip replay. Zero-trade days (no price discovery) are
+        dropped. ponytail: pClosing vs pDrCotVal (adjusted close) — we use
+        pClosing, matching the reconciled close; revisit if capital changes
+        (تقسیم/افزایش سرمایه) start distorting history.
         """
-        url = f"{self._base}/api/Parcode/GetInsClientTypes/{ins_code}"
+        url = f"{self._base}/api/ClosingPrice/GetClosingPriceDailyList/{ins_code}/{days}"
         payload = await self._http.request_json(url)
         rows = self._extract_rows(payload, url)
-        if not rows:
-            raise ProviderParseError(f"tsetmc: empty client-types payload: {url}")
-        return self._normalize_client_types(ins_code, rows[0])
+        bars: list[Candle] = []
+        for row in rows:
+            if not row.get("qTotTran5J"):
+                continue  # no trades: not a real session bar
+            d_even = int(row.get("dEven") or 0)
+            if not d_even:
+                continue
+            stamp = str(d_even).zfill(8)
+            start = datetime(int(stamp[:4]), int(stamp[4:6]), int(stamp[6:]), 9, 0, tzinfo=TEHRAN)
+            bars.append(Candle(
+                instrument_id=instrument_id,
+                timeframe="1d", start_time=start, end_time=start + timedelta(hours=4),
+                open=int(round(float(row.get("priceFirst") or 0))),
+                high=int(round(float(row.get("priceMax") or 0))),
+                low=int(round(float(row.get("priceMin") or 0))),
+                close=int(round(float(row.get("pClosing") or 0))),
+                volume=int(round(float(row.get("qTotTran5J") or 0))),
+                trade_count=int(round(float(row.get("zTotTran") or 0))),
+                status=CandleStatus.RECONCILED, source="eod",
+            ))
+        bars.reverse()
+        return bars
+
+    async def get_client_types_all(self) -> list[ClientTypeBreakdown]:
+        """Fetch the whole market's individual/legal (حقیقی/حقوقی) split in one call.
+
+        GetClientTypeAll returns one row per instrument with cumulative day
+        counters (I = individual, N = legal). Endpoint + field names verified
+        live 2026-10-17 against the payload itself; the per-instrument
+        Parcode/GetInsClientTypes path used earlier does not exist.
+        """
+        url = f"{self._base}/api/ClientType/GetClientTypeAll"
+        payload = await self._http.request_json(url)
+        rows = self._extract_rows(payload, url)
+        return [self._normalize_client_types(row) for row in rows]
 
     # ------------------------------------------------------------- parsing
 
@@ -72,14 +110,14 @@ class TsetmcProvider(MarketDataProvider):
         if isinstance(payload, list):
             return payload
         if isinstance(payload, dict):
-            for key in ("data", "clientTypes", "items"):
+            for key in ("data", "closingPriceDaily", "clientTypes", "clientTypeAllDto", "clientType", "items"):
                 rows = payload.get(key)
                 if isinstance(rows, list):
                     return rows
         raise ProviderParseError(f"tsetmc: unexpected payload type {type(payload).__name__}: {url}")
 
     @staticmethod
-    def _normalize_client_types(ins_code: str, row: dict) -> ClientTypeBreakdown:
+    def _normalize_client_types(row: dict) -> ClientTypeBreakdown:
         def pick(*names: str) -> int | None:
             for name in names:
                 value = row.get(name)
@@ -91,17 +129,19 @@ class TsetmcProvider(MarketDataProvider):
             return None
 
         breakdown = ClientTypeBreakdown(
-            ins_code=ins_code,
-            buy_i_count=pick("buy_Individual_Count", "buyIndividualCount"),
-            buy_i_volume=pick("buy_Individual_Volume", "buyIndividualVolume"),
-            sell_i_count=pick("sell_Individual_Count", "sellIndividualCount"),
-            sell_i_volume=pick("sell_Individual_Volume", "sellIndividualVolume"),
-            buy_l_count=pick("buy_Legal_Count", "buyLegalCount"),
-            buy_l_volume=pick("buy_Legal_Volume", "buyLegalVolume"),
-            sell_l_count=pick("sell_Legal_Count", "sellLegalCount"),
-            sell_l_volume=pick("sell_Legal_Volume", "sellLegalVolume"),
+            ins_code=str(row.get("insCode") or ""),
+            buy_i_count=pick("buy_CountI", "buy_I_Count"),
+            buy_i_volume=pick("buy_I_Volume"),
+            sell_i_count=pick("sell_CountI", "sell_I_Count"),
+            sell_i_volume=pick("sell_I_Volume"),
+            buy_l_count=pick("buy_CountN", "buy_N_Count"),
+            buy_l_volume=pick("buy_N_Volume"),
+            sell_l_count=pick("sell_CountN", "sell_N_Count"),
+            sell_l_volume=pick("sell_N_Volume"),
             source=PROVIDER_NAME,
         )
+        if not breakdown.ins_code:
+            raise ProviderParseError(f"tsetmc: client-types row without insCode: {sorted(row)}")
         if breakdown.buy_i_volume is None and breakdown.sell_i_volume is None:
             raise ProviderParseError(
                 f"tsetmc: client-types row without individual fields: {sorted(row)}"

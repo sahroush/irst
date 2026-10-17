@@ -85,10 +85,35 @@ def _intraday_flips(indicator, instrument_id, daily: list[Candle], sub_bars: lis
 
 
 def _chart_series(c, instrument_id, timeframe: str, limit: int, stored: set[str]) -> list[Candle]:
-    if timeframe in stored or timeframe not in {"1h", "1d"} or "30m" not in stored:
-        return c.candles_repo.get_series(instrument_id, timeframe, limit=limit) if timeframe in stored else []
-    target = Timeframe(timeframe)
+    """Candle series for one instrument.
+
+    1d is special: stored EOD bars (official exchange daily rows, stamped
+    09:00, no intraday data) merge with bars derived from 30m, which cover
+    the recent window and today's in-progress bar. EOD bars strictly older
+    than the first 30m day are kept; the derived view wins for overlapping
+    days so the provisional bar and intraday flips stay intact.
+    """
+    if timeframe == "1d":
+        eod = c.candles_repo.get_series(instrument_id, "1d", limit=limit) if "1d" in stored else []
+        if "30m" not in stored:
+            return eod[-limit:]
+        recent = _derive_from_30m(c, instrument_id, Timeframe("1d"), limit)
+        recent_days = {bar.start_time.date().isoformat() for bar in recent}
+        # EOD fills the days 30m does not cover: deep history before coverage
+        # began AND gap days inside the window (serve downtime, holidays).
+        # Days 30m covers stay derived so today's provisional bar survives.
+        kept = [bar for bar in eod if bar.start_time.date().isoformat() not in recent_days]
+        return sorted(kept + recent, key=lambda bar: bar.start_time)[-limit:]
+    if timeframe in stored:
+        return c.candles_repo.get_series(instrument_id, timeframe, limit=limit)
+    if timeframe in {"1h"} and "30m" in stored:
+        return _derive_from_30m(c, instrument_id, Timeframe(timeframe), limit)
+    return []
+
+
+def _derive_from_30m(c, instrument_id, target: Timeframe, limit: int) -> list[Candle]:
     is_daily = target.is_daily
+    timeframe = target.code
     unit, amount = timeframe[-1], int(timeframe[:-1])
     source = c.candles_repo.get_series(instrument_id, "30m", limit=limit * (7 if is_daily else 2))
     grouped = {}
@@ -198,21 +223,29 @@ def _ema_screen(c, kind: str, stored: set[str]) -> list[dict]:
         close = closes[-1]
         if not holds(close, e6, e11, e21):
             continue
-        # The ratio shows how far above the reference the condition holds.
-        reference = close if kind == "price_ema6" else e6 if kind == "ema6_ema11" else e11
+        # Strength = how far the condition's left side exceeds its right side.
+        pair = {"price_ema6": (close, e6), "ema6_ema11": (e6, e11), "ema11_ema21": (e11, e21)}[kind]
+        left, right = pair
         rows.append({
             "instrument_id": str(instrument.id), "symbol": instrument.symbol,
             "close": close, "ema6": e6, "ema11": e11, "ema21": e21,
-            "value": close / reference if reference else None,
+            "value": left / right if right else None,
             "candle_time": usable[-1].start_time.isoformat(),
         })
     return sorted(rows, key=lambda row: (row["value"] or 0), reverse=True)
 
 
 def _buyer_power_screen(c) -> list[dict]:
-    """قدرت خریدار حقیقی > 1.5 × قدرت فروشنده حقیقی on the latest stored day."""
+    """قدرت خریدار حقیقی > 1.5 × قدرت فروشنده حقیقی on the latest stored day.
+
+    Tradeability-gated like the other screens (min settled value + price
+    discovery) so the tab lists only liquid names.
+    """
+    gate = _liquidity(c)
     rows = []
     for row in latest_client_types(c.store):
+        if not _tradeable(c, gate, row.get("instrument_id")):
+            continue
         bp = row["buy_i_volume"] / row["buy_i_count"] if row["buy_i_count"] else None
         sp = row["sell_i_volume"] / row["sell_i_count"] if row["sell_i_count"] else None
         if bp is None or sp is None or bp <= BUYER_POWER_RATIO * sp:

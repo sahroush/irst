@@ -4,6 +4,7 @@ from datetime import date, datetime
 
 import pytest
 
+from iran_market.errors import ProviderParseError
 from iran_market.providers.tsetmc import TsetmcProvider
 from iran_market.timeutil import heven_to_time, parse_heven
 from iran_market.timeutil import TEHRAN
@@ -75,3 +76,27 @@ def test_normalize_price_float_to_int():
     raw = [tsetmc_row(100000, 1, price=3350.0)]
     trades = TsetmcProvider._normalize(INS_CODE, date(2026, 9, 23), raw)
     assert trades[0].price == 3350 and isinstance(trades[0].price, int)
+
+
+def test_normalize_client_types_real_payload_shape():
+    """Row shape verified live 2026-10-17 from /api/ClientType/GetClientTypeAll."""
+    row = {
+        "insCode": "39453972158399542", "buy_I_Volume": 75718999.0,
+        "buy_N_Volume": 189311710.0, "buy_DDD_Volume": 0.0,
+        "buy_CountI": 553, "buy_CountN": 8, "buy_CountDDD": 0,
+        "sell_I_Volume": 143361648.0, "sell_N_Volume": 121669061.0,
+        "sell_CountI": 691, "sell_CountN": 12,
+    }
+    b = TsetmcProvider._normalize_client_types(row)
+    assert b.ins_code == "39453972158399542"
+    assert b.buy_i_volume == 75718999 and b.buy_i_count == 553
+    assert b.sell_i_volume == 143361648 and b.sell_i_count == 691
+    assert b.buy_l_volume == 189311710 and b.buy_l_count == 8
+    assert b.sell_l_volume == 121669061 and b.sell_l_count == 12
+    assert b.buy_power == pytest.approx(75718999 / 553)
+    assert b.sell_power == pytest.approx(143361648 / 691)
+
+
+def test_normalize_client_types_rejects_row_without_insid():
+    with pytest.raises(ProviderParseError):
+        TsetmcProvider._normalize_client_types({"buy_I_Volume": 1})
