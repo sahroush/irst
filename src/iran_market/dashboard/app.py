@@ -194,11 +194,7 @@ def _tradeable(c, gate: dict[str, tuple[float, int]], instrument_id) -> bool:
             and closes >= c.settings.min_price_discovery)
 
 
-EMA_SCREENS = {
-    "price_ema6": lambda close, e6, e11, e21: close > e6 if (close and e6) else False,
-    "ema6_ema11": lambda close, e6, e11, e21: e6 > e11 if (e6 and e11) else False,
-    "ema11_ema21": lambda close, e6, e11, e21: e11 > e21 if (e11 and e21) else False,
-}
+EMA_SCREENS = {"price_ema6", "ema6_ema11", "ema11_ema21"}
 BUYER_POWER_RATIO = 1.5
 
 # The three EMA tabs share one per-instrument daily snapshot (series + EMAs):
@@ -214,8 +210,9 @@ _ema_cache_lock = threading.Lock()
 
 
 def _ema_snapshot(c, stored: set[str]) -> dict[str, dict]:
-    """Per-instrument {close, ema6, ema11, ema21, candle_time} for the market.
+    """Per-instrument {close, ema6, ..., prev_close, ..., candle_time} for the market.
 
+    Current and previous bar values so tabs can detect crosses, not states.
     Shared by the three EMA tabs and cached briefly: building it walks every
     tradeable instrument's daily series (~1s), while each tab only filters.
     """
@@ -236,30 +233,47 @@ def _ema_snapshot(c, stored: set[str]) -> dict[str, dict]:
             if not usable:
                 continue
             closes = [float(bar.close) for bar in usable]
+            e6 = ema_series(closes, 6)
+            e11 = ema_series(closes, 11)
+            e21 = ema_series(closes, 21)
             snapshot[str(instrument.id)] = {
                 "symbol": instrument.symbol,
                 "close": closes[-1],
-                "ema6": ema_series(closes, 6)[-1],
-                "ema11": ema_series(closes, 11)[-1],
-                "ema21": ema_series(closes, 21)[-1],
+                "ema6": e6[-1], "ema11": e11[-1], "ema21": e21[-1],
+                "prev_close": closes[-2] if len(closes) > 1 else None,
+                "prev_ema6": e6[-2] if len(closes) > 1 else None,
+                "prev_ema11": e11[-2] if len(closes) > 1 else None,
+                "prev_ema21": e21[-2] if len(closes) > 1 else None,
                 "candle_time": usable[-1].start_time.isoformat(),
             }
         _ema_cache["snapshot"] = (time.monotonic(), snapshot)
         return snapshot
 
 
-def _ema_screen(c, kind: str, stored: set[str]) -> list[dict]:
-    """Instruments where the daily EMA condition holds on the latest bar.
+def _ema_cache_reset():
+    """Drop the shared EMA snapshot (tests use it between data mutations)."""
+    _ema_cache["snapshot"] = (0.0, {})
 
-    The in-progress day participates via provisional_candles, so a screen can
-    fire intraday; the close can still reverse it before session end.
+
+def _ema_screen(c, kind: str, stored: set[str]) -> list[dict]:
+    """Instruments where the daily EMA pair crossed upward on the latest bar.
+
+    A signal only on the transition (was below/equal, now above), not every
+    bar the condition merely holds on. The in-progress day participates via
+    provisional_candles, so a cross can fire intraday; the close can still
+    reverse it before session end.
     """
-    holds = EMA_SCREENS[kind]
     pair = {"price_ema6": ("close", "ema6"), "ema6_ema11": ("ema6", "ema11"), "ema11_ema21": ("ema11", "ema21")}[kind]
+    left_key, right_key = pair
+    prev_left_key, prev_right_key = "prev_" + left_key, "prev_" + right_key
     rows = []
     for instrument_id, s in _ema_snapshot(c, stored).items():
-        values = (s["close"], s["ema6"], s["ema11"], s["ema21"])
-        if not holds(*values):
+        left, right = s[left_key], s[right_key]
+        prev_left, prev_right = s[prev_left_key], s[prev_right_key]
+        if not (left and right):
+            continue
+        # cross signal: currently above, and not above on the previous bar
+        if not (left > right and not (prev_left and prev_right and prev_left > prev_right)):
             continue
         left, right = s[pair[0]], s[pair[1]]
         rows.append({

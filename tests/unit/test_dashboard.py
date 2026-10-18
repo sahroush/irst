@@ -446,19 +446,22 @@ def test_screen_endpoint_kinds_and_tabs(tmp_path):
 
     c = build(Settings.for_tests(database_url=f"sqlite:///{tmp_path/'db.sqlite'}"))
     instrument = c.instruments_repo.upsert(Instrument(symbol="A", isin="IRO1TEST0001", ins_code="123"))
-    # 25 real 1d bars (stored "1d" rows are read directly by _chart_series);
-    # closes rise monotonically so every EMA condition holds.
-    for i in range(25):
+    # 30 real 1d bars (stored "1d" rows are read directly by _chart_series).
+    # Long rise, then a sustained decline (puts price below all EMAs and
+    # inverts every EMA pair), then one big close -> the last bar crosses
+    # every pair upward.
+    closes = [105 + i for i in range(23)] + [110 - 5 * i for i in range(1, 8)] + [200]
+    for i, close in enumerate(closes):
         s = datetime(2026, 9, 1, tzinfo=TEHRAN) + timedelta(days=i)
         c.candles_repo.upsert(Candle(
             instrument_id=instrument.id, timeframe="1d", start_time=s,
-            end_time=s + timedelta(hours=4), open=100 + i, high=110 + i,
-            low=90 + i, close=105 + i, volume=1000, trade_count=5,
+            end_time=s + timedelta(hours=4), open=closes[0], high=close + 5,
+            low=close - 15, close=close, volume=1000, trade_count=5,
             status=CandleStatus.CLOSED,
         ))
     client = TestClient(create_app(c))
-    # Closes rise monotonically, so every EMA condition holds. The metric is
-    # the condition's LHS/RHS pair, and it must sort with real spread.
+    # Last bar crosses each pair upward (prev bar was below), so each screen
+    # fires exactly once. The metric is the condition's LHS/RHS pair.
     for kind, lhs_key, rhs_key in (("price_ema6", "close", "ema6"),
                                    ("ema6_ema11", "ema6", "ema11"),
                                    ("ema11_ema21", "ema11", "ema21")):
@@ -466,6 +469,19 @@ def test_screen_endpoint_kinds_and_tabs(tmp_path):
         assert len(rows) == 1 and rows[0]["symbol"] == "A"
         assert rows[0]["value"] == pytest.approx(rows[0][lhs_key] / rows[0][rhs_key])
         assert rows[0]["value"] > 1.0
+    # No cross when the condition merely keeps holding: append another high
+    # bar and the screens go quiet again (state, not transition).
+    c.candles_repo.upsert(Candle(
+        instrument_id=instrument.id, timeframe="1d",
+        start_time=datetime(2026, 10, 2, tzinfo=TEHRAN),
+        end_time=datetime(2026, 10, 2, 4, tzinfo=TEHRAN),
+        open=200, high=210, low=190, close=205, volume=1000, trade_count=5,
+        status=CandleStatus.CLOSED,
+    ))
+    from iran_market.dashboard.app import _ema_cache_reset
+    _ema_cache_reset()
+    for kind in ("price_ema6", "ema6_ema11", "ema11_ema21"):
+        assert client.get(f"/api/screen?kind={kind}").json() == []
     assert client.get("/api/screen?kind=nope").status_code == 422
     # buyer_power: individual buy power 2x sell power -> passes the 1.5 gate.
     upsert_client_types(c.store, ClientTypeBreakdown(

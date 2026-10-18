@@ -5,9 +5,9 @@
   const state = { timeframe: '', tab: 'supertrend', chart: null, rsiChart: null, instrumentId: null, poll: null, requestId: 0, chartPoints: [], rsiValues: [], rsiVisible: false, syncingRange: false, seeded: false };
   const TABS = {
     supertrend: { title: 'Supertrend flips' },
-    price_ema6: { title: 'Daily close > EMA6', value: (row) => `${num(row.close)} / ${num(row.ema6)}` },
-    ema6_ema11: { title: 'EMA6 > EMA11 (daily)', value: (row) => `${num(row.ema6)} / ${num(row.ema11)}` },
-    ema11_ema21: { title: 'EMA11 > EMA21 (daily)', value: (row) => `${num(row.ema11)} / ${num(row.ema21)}` },
+    price_ema6: { title: 'Price crossed above EMA6 (daily)', value: (row) => `${num(row.close)} / ${num(row.ema6)}` },
+    ema6_ema11: { title: 'EMA6 crossed above EMA11 (daily)', value: (row) => `${num(row.ema6)} / ${num(row.ema11)}` },
+    ema11_ema21: { title: 'EMA11 crossed above EMA21 (daily)', value: (row) => `${num(row.ema11)} / ${num(row.ema21)}` },
     buyer_power: { title: 'قدرت خریدار حقیقی > ۱.۵ فروشنده', value: (row) => `${num(row.buy_power)} / ${num(row.sell_power)}` },
   };
   const els = {
