@@ -197,6 +197,32 @@ def _tradeable(c, gate: dict[str, tuple[float, int]], instrument_id) -> bool:
 EMA_SCREENS = {"price_ema6", "ema6_ema11", "ema11_ema21"}
 BUYER_POWER_RATIO = 1.5
 
+# Playlists: curated symbol lists limiting which instruments the screens and
+# the instruments list review. "all" (no filter) is implicit; the named ones
+# live in playlists.json beside this file. Read at startup: editing the file
+# takes effect on the next dashboard start (fine for a read-only MVP).
+_PLAYLISTS_PATH = Path(__file__).with_name("playlists.json")
+
+
+def _load_playlists() -> dict[str, set[str]]:
+    try:
+        raw = json.loads(_PLAYLISTS_PATH.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {name: {str(s).strip() for s in symbols if str(s).strip()}
+            for name, symbols in raw.items() if isinstance(symbols, list)}
+
+
+def _playlist_symbols(playlist: str | None) -> set[str] | None:
+    """Symbol set for a playlist name; None = no filtering (all).
+
+    Unknown playlist names fall back to no filtering so a stale UI link
+    never blanks the dashboard silently.
+    """
+    if not playlist or playlist == "all":
+        return None
+    return _load_playlists().get(playlist)
+
 # The three EMA tabs share one per-instrument daily snapshot (series + EMAs):
 # ~1s of work for the whole market, so serve it from a short-TTL cache and
 # let each tab just filter it. TTL < the 30s poll, so in-progress bars stay
@@ -255,19 +281,21 @@ def _ema_cache_reset():
     _ema_cache["snapshot"] = (0.0, {})
 
 
-def _ema_screen(c, kind: str, stored: set[str]) -> list[dict]:
+def _ema_screen(c, kind: str, stored: set[str], symbols: set[str] | None = None) -> list[dict]:
     """Instruments where the daily EMA pair crossed upward on the latest bar.
 
     A signal only on the transition (was below/equal, now above), not every
     bar the condition merely holds on. The in-progress day participates via
     provisional_candles, so a cross can fire intraday; the close can still
-    reverse it before session end.
+    reverse it before session end. `symbols` limits the review to a playlist.
     """
     pair = {"price_ema6": ("close", "ema6"), "ema6_ema11": ("ema6", "ema11"), "ema11_ema21": ("ema11", "ema21")}[kind]
     left_key, right_key = pair
     prev_left_key, prev_right_key = "prev_" + left_key, "prev_" + right_key
     rows = []
     for instrument_id, s in _ema_snapshot(c, stored).items():
+        if symbols is not None and s["symbol"] not in symbols:
+            continue
         left, right = s[left_key], s[right_key]
         prev_left, prev_right = s[prev_left_key], s[prev_right_key]
         if not (left and right):
@@ -285,15 +313,18 @@ def _ema_screen(c, kind: str, stored: set[str]) -> list[dict]:
     return sorted(rows, key=lambda row: (row["value"] or 0), reverse=True)
 
 
-def _buyer_power_screen(c) -> list[dict]:
+def _buyer_power_screen(c, symbols: set[str] | None = None) -> list[dict]:
     """قدرت خریدار حقیقی > 1.5 × قدرت فروشنده حقیقی on the latest stored day.
 
     Tradeability-gated like the other screens (min settled value + price
-    discovery) so the tab lists only liquid names.
+    discovery) so the tab lists only liquid names. `symbols` limits the
+    review to a playlist.
     """
     gate = _liquidity(c)
     rows = []
     for row in latest_client_types(c.store):
+        if symbols is not None and row.get("symbol") not in symbols:
+            continue
         if not _tradeable(c, gate, row.get("instrument_id")):
             continue
         bp = row["buy_i_volume"] / row["buy_i_count"] if row["buy_i_count"] else None
@@ -308,7 +339,7 @@ def _buyer_power_screen(c) -> list[dict]:
     return sorted(rows, key=lambda row: (row["value"] or 0), reverse=True)
 
 
-def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrument_id=None) -> list[dict]:
+def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrument_id=None, symbols: set[str] | None = None) -> list[dict]:
     if timeframe == c.settings.scanner_timeframe and timeframe in stored:
         sql = """SELECT s.*, i.symbol FROM signals s
                  LEFT JOIN instruments i ON i.id=s.instrument_id
@@ -317,6 +348,9 @@ def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrume
         if instrument_id is not None:
             sql += " AND s.instrument_id=?"
             params.append(str(instrument_id))
+        if symbols is not None:
+            sql += f" AND i.symbol IN ({','.join('?' * len(symbols))})"
+            params.extend(sorted(symbols))
         sql += " ORDER BY s.candle_time DESC LIMIT ?"
         params.append(limit)
         rows = c.store.connect().execute(sql, params).fetchall()
@@ -424,14 +458,18 @@ def create_app(container=None) -> FastAPI:
     @app.get("/api/config")
     def config():
         stored = _stored_timeframes(c)
-        return {"scanner_timeframe": c.settings.scanner_timeframe, "available_timeframes": _timeframes(stored, c.settings.scanner_timeframe)}
+        return {"scanner_timeframe": c.settings.scanner_timeframe,
+                "available_timeframes": _timeframes(stored, c.settings.scanner_timeframe),
+                "playlists": ["all", *sorted(_load_playlists())]}
 
     @app.get("/api/instruments")
-    def instruments(limit: int = Query(100, ge=1, le=1000), q: str = "", timeframe: str | None = None):
+    def instruments(limit: int = Query(100, ge=1, le=1000), q: str = "", timeframe: str | None = None,
+                    playlist: str | None = None):
         stored = _stored_timeframes(c)
         tf = timeframe or c.settings.scanner_timeframe
         if tf not in _timeframes(stored, c.settings.scanner_timeframe):
             raise HTTPException(422, "unsupported timeframe")
+        symbols = _playlist_symbols(playlist)
         if tf in stored:
             sql = """SELECT i.*, c.close, c.status candle_status, c.updated_at candle_updated
                      FROM instruments i LEFT JOIN candles c ON c.rowid=(SELECT c2.rowid FROM candles c2
@@ -441,6 +479,9 @@ def create_app(container=None) -> FastAPI:
             if q:
                 sql += " AND (i.symbol LIKE ? OR i.name LIKE ? OR i.isin LIKE ?)"
                 params.extend([f"%{q}%"] * 3)
+            if symbols is not None:
+                sql += f" AND i.symbol IN ({','.join('?' * len(symbols))})"
+                params.extend(sorted(symbols))
             sql += " ORDER BY i.symbol LIMIT ?"
             params.append(limit)
             rows = c.store.connect().execute(sql, params).fetchall()
@@ -452,6 +493,8 @@ def create_app(container=None) -> FastAPI:
             } for row in rows]
 
         rows = c.instruments_repo.list_active()
+        if symbols is not None:
+            rows = [row for row in rows if row.symbol in symbols]
         if q:
             query = q.casefold()
             rows = [row for row in rows if query in " ".join((row.symbol or "", row.name or "", row.isin or "")).casefold()]
@@ -469,20 +512,21 @@ def create_app(container=None) -> FastAPI:
         return output
 
     @app.get("/api/signals")
-    def signals(limit: int = Query(50, ge=1, le=500), timeframe: str | None = None):
+    def signals(limit: int = Query(50, ge=1, le=500), timeframe: str | None = None, playlist: str | None = None):
         stored = _stored_timeframes(c)
         tf = timeframe or c.settings.scanner_timeframe
         if tf not in _timeframes(stored, c.settings.scanner_timeframe):
             raise HTTPException(422, "unsupported timeframe")
-        return _timeframe_signals(c, tf, stored, limit)
+        return _timeframe_signals(c, tf, stored, limit, symbols=_playlist_symbols(playlist))
 
     @app.get("/api/screen")
-    def screen(kind: str, limit: int = Query(100, ge=1, le=500)):
+    def screen(kind: str, limit: int = Query(100, ge=1, le=500), playlist: str | None = None):
         stored = _stored_timeframes(c)
+        symbols = _playlist_symbols(playlist)
         if kind in EMA_SCREENS:
-            return _ema_screen(c, kind, stored)[:limit]
+            return _ema_screen(c, kind, stored, symbols)[:limit]
         if kind == "buyer_power":
-            return _buyer_power_screen(c)[:limit]
+            return _buyer_power_screen(c, symbols)[:limit]
         raise HTTPException(422, f"unknown screen kind: {kind}")
 
     @app.get("/api/instruments/{instrument_id}")

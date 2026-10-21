@@ -2,7 +2,7 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
-  const state = { timeframe: '', tab: 'supertrend', chart: null, rsiChart: null, instrumentId: null, poll: null, requestId: 0, chartPoints: [], rsiValues: [], rsiVisible: false, syncingRange: false, seeded: false };
+  const state = { timeframe: '', playlist: 'all', tab: 'supertrend', chart: null, rsiChart: null, instrumentId: null, poll: null, requestId: 0, chartPoints: [], rsiValues: [], rsiVisible: false, syncingRange: false, seeded: false };
   const TABS = {
     supertrend: { title: 'Supertrend flips' },
     price_ema6: { title: 'Price crossed above EMA6 (daily)', value: (row) => `${num(row.close)} / ${num(row.ema6)}` },
@@ -16,7 +16,7 @@
     signalRows: $('signal-rows'), signalsHead: $('signals-head'), signalsTitle: $('signals-title'),
     error: $('page-error'),
     status: $('page-status'), updated: $('updated-at'), detail: $('detail'), detailTitle: $('detail-title'),
-    timeframe: $('timeframe'), closeDetail: $('close-detail'), chart: $('market-chart'),
+    timeframe: $('timeframe'), playlist: $('playlist'), closeDetail: $('close-detail'), chart: $('market-chart'),
     chartSummary: $('chart-summary'), chartEmpty: $('chart-empty'), marketState: $('market-state'), candleAge: $('candle-age'), rsiToggle: $('rsi-toggle'), rsiLegend: $('rsi-legend'), rsiPanel: $('rsi-panel'), rsiChart: $('rsi-chart'),
   };
   const esc = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[char]);
@@ -79,11 +79,12 @@
     try {
       setError();
       const timeframe = encodeURIComponent(state.timeframe);
+      const playlist = encodeURIComponent(state.playlist || 'all');
       const tab = TABS[state.tab] || TABS.supertrend;
       els.signalsTitle.textContent = tab.title;
       const rowsUrl = state.tab === 'supertrend'
-        ? `/api/signals?limit=30&timeframe=${timeframe}`
-        : `/api/screen?kind=${encodeURIComponent(state.tab)}&limit=100`;
+        ? `/api/signals?limit=30&timeframe=${timeframe}&playlist=${playlist}`
+        : `/api/screen?kind=${encodeURIComponent(state.tab)}&limit=100&playlist=${playlist}`;
       const [health, signals] = await Promise.all([
         get('/api/health'),
         get(rowsUrl),
@@ -228,7 +229,7 @@
     const timeframe = encodeURIComponent(els.timeframe.value || state.timeframe);
     let matches;
     try {
-      matches = await get(`/api/instruments?limit=1&timeframe=${timeframe}&q=${encodeURIComponent(query)}`);
+      matches = await get(`/api/instruments?limit=1&timeframe=${timeframe}&playlist=${encodeURIComponent(state.playlist || 'all')}&q=${encodeURIComponent(query)}`);
     } catch (error) {
       setError(`Instrument lookup failed: ${error.message}`);
       return;
@@ -314,6 +315,10 @@
       state.timeframe = options.includes('1d') ? '1d' : (options.includes(config.scanner_timeframe) ? config.scanner_timeframe : (options[0] || ''));
       els.timeframe.innerHTML = options.map((timeframe) => `<option value="${esc(timeframe)}">${esc(timeframe)}</option>`).join('');
       els.timeframe.value = state.timeframe;
+      const playlists = Array.isArray(config.playlists) && config.playlists.length ? config.playlists : ['all'];
+      els.playlist.innerHTML = playlists.map((playlist) => `<option value="${esc(playlist)}">${esc(playlist)}</option>`).join('');
+      state.playlist = playlists.includes('all') ? 'all' : playlists[0];
+      els.playlist.value = state.playlist;
       return Boolean(state.timeframe);
     } catch (error) {
       state.timeframe = '';
@@ -377,6 +382,11 @@
     state.timeframe = els.timeframe.value;
     loadDashboard();
     if (state.instrumentId && !state.chart) openInstrument(state.instrumentId);
+  });
+  els.playlist.addEventListener('change', () => {
+    state.playlist = els.playlist.value || 'all';
+    state.seeded = false;  // re-seed the chart from the new playlist's rows
+    loadDashboard({ chart: false });
   });
   document.querySelectorAll('[data-range]').forEach((button) => button.addEventListener('click', () => {
     if (!state.chart || !state.chartPoints.length) return;

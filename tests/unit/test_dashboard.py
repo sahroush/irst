@@ -128,6 +128,7 @@ def test_dashboard_config_exposes_only_stored_timeframes(tmp_path):
     assert client.get('/api/config').json() == {
         "scanner_timeframe": c.settings.scanner_timeframe,
         "available_timeframes": ["30m", "1h", "1d"],
+        "playlists": ["all", "main"],
     }
     assert client.get(f'/api/instruments/{instrument.id}?timeframe=5m').status_code == 422
 
@@ -495,6 +496,48 @@ def test_screen_endpoint_kinds_and_tabs(tmp_path):
     page = client.get("/").text
     for tab in ("price_ema6", "ema6_ema11", "ema11_ema21", "buyer_power"):
         assert f'data-tab="{tab}"' in page
+
+
+def test_playlists_filter_screens_and_instruments(tmp_path, monkeypatch):
+    from iran_market.dashboard import app as app_module
+    from iran_market.dashboard.app import _ema_cache_reset
+
+    # Two instruments cross every EMA pair; the playlist names only "A".
+    monkeypatch.setattr(app_module, "_load_playlists",
+                        lambda: {"main": {"A"}})
+    c = build(Settings.for_tests(database_url=f"sqlite:///{tmp_path/'db.sqlite'}"))
+    for symbol in ("A", "B"):
+        instrument = c.instruments_repo.upsert(Instrument(symbol=symbol, isin=f"IRO1TEST00{symbol}", ins_code=symbol))
+        closes = [105 + i for i in range(23)] + [110 - 5 * i for i in range(1, 8)] + [200]
+        for i, close in enumerate(closes):
+            s = datetime(2026, 9, 1, tzinfo=TEHRAN) + timedelta(days=i)
+            c.candles_repo.upsert(Candle(
+                instrument_id=instrument.id, timeframe="1d", start_time=s,
+                end_time=s + timedelta(hours=4), open=closes[0], high=close + 5,
+                low=close - 15, close=close, volume=1000, trade_count=5,
+                status=CandleStatus.CLOSED,
+            ))
+    client = TestClient(create_app(c))
+    _ema_cache_reset()
+
+    # Config lists the implicit "all" plus the named playlists.
+    config = client.get("/api/config").json()
+    assert config["playlists"] == ["all", "main"]
+
+    # Unfiltered: both instruments screen. With playlist=main: only "A".
+    rows = client.get("/api/screen?kind=price_ema6").json()
+    assert {r["symbol"] for r in rows} == {"A", "B"}
+    rows = client.get("/api/screen?kind=price_ema6&playlist=main").json()
+    assert [r["symbol"] for r in rows] == ["A"]
+    # Unknown playlist falls back to unfiltered (no silent blanking).
+    rows = client.get("/api/screen?kind=price_ema6&playlist=missing").json()
+    assert {r["symbol"] for r in rows} == {"A", "B"}
+
+    # Same filter on the instruments list.
+    rows = client.get("/api/instruments?timeframe=1d&limit=1000").json()
+    assert {r["symbol"] for r in rows} == {"A", "B"}
+    rows = client.get("/api/instruments?timeframe=1d&playlist=main").json()
+    assert [r["symbol"] for r in rows] == ["A"]
 
 
 def test_chart_series_merges_eod_with_derived_daily(tmp_path):
