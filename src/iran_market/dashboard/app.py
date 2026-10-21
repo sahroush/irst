@@ -372,6 +372,8 @@ def _timeframe_signals(c, timeframe: str, stored: set[str], limit: int, instrume
 
     indicator, signals = SupertrendIndicator(), []
     instruments = c.instruments_repo.list_active()
+    if symbols is not None:
+        instruments = [item for item in instruments if item.symbol in symbols]
     if instrument_id is not None:
         instruments = [item for item in instruments if item.id == instrument_id]
     else:

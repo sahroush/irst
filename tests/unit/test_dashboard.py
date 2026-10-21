@@ -539,6 +539,13 @@ def test_playlists_filter_screens_and_instruments(tmp_path, monkeypatch):
     rows = client.get("/api/instruments?timeframe=1d&playlist=main").json()
     assert [r["symbol"] for r in rows] == ["A"]
 
+    # And on signals recomputed for a non-scanner timeframe (the fallback
+    # branch iterates list_active(), so the playlist must prune it too).
+    rows = client.get("/api/signals?timeframe=1d&limit=50").json()
+    assert {r["symbol"] for r in rows} == {"A", "B"}
+    rows = client.get("/api/signals?timeframe=1d&limit=50&playlist=main").json()
+    assert {r["symbol"] for r in rows} == {"A"}
+
 
 def test_chart_series_merges_eod_with_derived_daily(tmp_path):
     """EOD backfill rows older than 30m coverage merge; overlap goes to 30m."""
