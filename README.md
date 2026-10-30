@@ -363,3 +363,7 @@ For hundreds of instruments, start with 25-30 sessions rather than years of raw
 trade history. Thirty sessions supplies roughly 120 hourly bars for a normal
 09:00-12:30 session, enough for the default Supertrend history window and a useful
 dashboard. Use `--start/--end` only when deeper history is actually required.
+
+## License
+
+MIT — see [LICENSE](LICENSE).
